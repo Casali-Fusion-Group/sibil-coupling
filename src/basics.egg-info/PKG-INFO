@@ -1,0 +1,31 @@
+Metadata-Version: 2.4
+Name: basics
+Version: 0.0.1
+Summary: A package to couple SOLPS-ITER and BOUT++
+Author-email: "B. Tate Taczak" <btaczak@vols.utk.edu>
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/pypa/sampleproject
+Project-URL: Issues, https://github.com/pypa/sampleproject/issues
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: netCDF4
+Requires-Dist: matplotlib
+Requires-Dist: scipy
+Requires-Dist: boututils
+Dynamic: license-file
+
+# BOUT++ And SOLPS-ITER Coupled Self-consistently (BASICS)
+
+The BASICS package self-consistently couples SOLPS-ITER and the BOUT++ ELM-6f model. 
+The package includes reader files for EQDSKs, b2fstate, b2fplasmf, and b2fgmtry.
+
+---
+
+## Installation
+
+Install with pip from the current directory:
+
+```bash
+pip install -e .

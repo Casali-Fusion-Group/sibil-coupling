@@ -1,0 +1,29 @@
+## High Priority
+
+-[X] Rewrite into python package to be released
+-[X] Radial smoothing factor
+
+
+## Medium Priority
+
+-[]
+
+
+## Low Priority
+
+-[]
+
+
+## Ideas
+
+-[] Create an equivalent SOLPS comparison to use bout.dl2d to view physical BOUT++ coordinates after mapping
+-[X] Create summary poloidal plotting scripts for solps
+-[X] Create summary poloidal plotting scripts for BOUT++
+-[X] Create summary poloidal plotting scripts for mapping grid
+-[] Create summary poloidal plotting scripts to compare static to statics
+-[] Create summary poloidal plotting scripts to compare static to mapping grid
+-[X] Create summary radial plotting scripts for solps
+-[X] Create summary radial plotting scripts for BOUT++
+-[X] Create summary radial plotting scripts for mapping grid
+-[] Create summary radial plotting scripts to compare static to statics
+-[] Create summary radial plotting scripts to compare static to mapping grid

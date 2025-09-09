@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basics_package"
+version = "0.0.1"
+authors = [{ name = "B. Tate Taczak", email = "btaczak@vols.utk.edu" }]
+description = "A package to couple SOLPS-ITER and BOUT++"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+dependencies = [
+    "numpy",
+    "netCDF4",
+    "matplotlib",
+    "scipy",
+    "boututils"
+]
+
+[project.urls]
+Homepage = "https://github.com/pypa/sampleproject"
+Issues = "https://github.com/pypa/sampleproject/issues"

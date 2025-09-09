@@ -1,0 +1,89 @@
+#!/bin/bash
+
+#-----------------------------------------------------------------------
+# SLURM script for SOLPS-ITER runs
+# See:
+# /cscratch/meiere/solps-iter_scratch/job-example for examples
+# https://diii-d.gat.com/diii-d/Iris
+#-----------------------------------------------------------------------
+
+#-----------------------------------------------------------------------
+# set SBATCH directives
+#-----------------------------------------------------------------------
+
+#SBATCH -p medium
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 24:00:00
+#SBATCH --mem=5G
+#SBATCH -o slurm-THERUN.log
+#SBATCH --job-name=THERUN
+#SBATCH --mail-user=jsmiskey@vols.utk.edu
+#SBATCH --mail-type END
+
+run=THERUN
+runbase=THERUNBASE
+
+#-----------------------------------------------------------------------
+# move files to scratch
+#-----------------------------------------------------------------------
+echo "moving files..."
+workdir=$PWD
+scratchdir=/cscratch/smiskeyj/solps-iter
+#cp -rp $run ${run}_bkup
+mv $run $scratchdir/$runbase/.
+if [ $? != 0 ]; then
+  echo "mv failed; quitting"
+  exit 1
+fi
+ln -s $scratchdir/$runbase/$run
+cd $scratchdir/$runbase/$run
+echo "done moving files."
+
+#-----------------------------------------------------------------------
+# touch appropriate files to prevent DIII-D scratch file system from
+# deleting them as old files
+#----------------------------------------------------------------------
+touch -c b2.*.parameters* # -c says don't create files
+touch -c *.dat sed.scr
+touch -ch ../baserun # -h says touch the symlink itself
+touch -ch fort.3[3-5]
+
+#-----------------------------------------------------------------------
+# store git info
+#-----------------------------------------------------------------------
+(cd $SOLPSTOP; cd modules/B2.5; git describe --dirty) &> git_info.txt
+
+#-----------------------------------------------------------------------
+# launch the run
+#-----------------------------------------------------------------------
+echo "beginning run..."
+date
+mv b2mn.dat b2mnog.dat
+cp b2mnog.dat b2mn.dat
+echo "'b2mndr_ntim'   '1'" >> b2mn.dat
+b2run b2mn >& run.log
+#b2run b2mn 2> /dev/null | stdbuf -oL grep -e "NTIM" \
+#  -e "i,respo" > run.log
+echo " done running b2mn."
+rm b2uf.prt
+b2run b2uf 2> /dev/null
+echo "done running b2uf."
+rm b2mn.dat
+mv b2mnog.dat b2mn.dat
+module switch python/2.7 python/3 #Need to change for OMEGA
+
+python3 /home/smiskeyj/SOLPSOutput/SOLPSOutput_GenerateGfile.py -s "$scratchdir/$runbase/$run" -f "$run""_gfile" #Need to change for different user
+
+#-----------------------------------------------------------------------
+# bring files back to working directory, etc.
+#-----------------------------------------------------------------------
+echo "cleaning up..."
+cd ..
+#rsync -aqcu $run $workdir/. --exclude=run.log* --exclude=b2mn.exe.dir
+rsync -aqcu $run $workdir/. --exclude=b2mn.exe.dir
+today=`date +%Y-%m-%d.%H:%M:%S`
+mv $run /cscratch/smiskeyj/solps-iter/junk/${run}_${today}
+cd $workdir
+mv slurm-THERUN.log logs/.
+echo "done with clean-up."
