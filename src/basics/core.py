@@ -72,8 +72,8 @@ class BASICS_Mapper:
         self.bout.update_gridfile()
         
         # Quickly summarize the major facts of the grid files for debugging.
-        self.solps.summarize()
-        self.map.summarize()
+        # self.solps.summarize()
+        # self.map.summarize()
         self.bout.summarize()
 
     def get_profiles(self):
