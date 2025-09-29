@@ -159,30 +159,30 @@ class Bout(Static_grid):
         
         self.dl2d = self.poloidal_distance
         
-        for j in range(self.ny):
-            if j == 0:
-                self.dl[:,j] = self.poloidal_distance[:,j]
-            elif j == self.jyseps11+1: # first poloidal coordinate past the divertor
-                self.dl[self.ixsep+1:,j] = self.poloidal_distance[self.ixsep+1:,j] - self.poloidal_distance[self.ixsep+1:,j-1] 
-                self.dl[:self.ixsep+1,j] = self.poloidal_distance[:self.ixsep+1,j]
-            elif j == self.jyseps22+1: # first poloidal coordinate in the outer divertor
-                self.dl[self.ixsep+1:,j] = self.poloidal_distance[self.ixsep+1:,j] - self.poloidal_distance[self.ixsep+1:,j-1] 
-                self.dl[:self.ixsep+1,j] = self.poloidal_distance[:self.ixsep+1,j] - self.poloidal_distance[:self.ixsep+1,self.jyseps11] 
-            else:
-                self.dl[:,j] = self.poloidal_distance[:,j] - self.poloidal_distance[:,j-1] 
+        # for j in range(self.ny):
+        #     if j == 0:
+        #         self.dl[:,j] = self.poloidal_distance[:,j]
+        #     elif j == self.jyseps11+1: # first poloidal coordinate past the divertor
+        #         self.dl[self.ixsep+1:,j] = self.poloidal_distance[self.ixsep+1:,j] - self.poloidal_distance[self.ixsep+1:,j-1] 
+        #         self.dl[:self.ixsep+1,j] = self.poloidal_distance[:self.ixsep+1,j]
+        #     elif j == self.jyseps22+1: # first poloidal coordinate in the outer divertor
+        #         self.dl[self.ixsep+1:,j] = self.poloidal_distance[self.ixsep+1:,j] - self.poloidal_distance[self.ixsep+1:,j-1] 
+        #         self.dl[:self.ixsep+1,j] = self.poloidal_distance[:self.ixsep+1,j] - self.poloidal_distance[:self.ixsep+1,self.jyseps11] 
+        #     else:
+        #         self.dl[:,j] = self.poloidal_distance[:,j] - self.poloidal_distance[:,j-1] 
         
         
-        # # for the private flux region and closed flux surfaces, estimate 
-        # # the distances separately
-        # for i in range(self.ixsep):
-        #     self.dl[i,self.j_cfs]=np.sqrt((self.rxy[i,self.j_cfs+1]-self.rxy[i,self.j_cfs])**2 + (self.zxy[i,self.j_cfs+1]-self.zxy[i,self.j_cfs])**2) 
-        #     self.dl[i,self.jyseps22]=np.sqrt((self.rxy[i,self.jyseps11+1]-self.rxy[i,self.jyseps22])**2+(self.zxy[i,self.jyseps11+1]-self.zxy[i,self.jyseps22])**2) 
-        #     self.dl[i,self.j_pfr[0:7]]=np.sqrt((self.rxy[i,self.j_pfr[1:8]]-self.rxy[i,self.j_pfr[0:7]])**2+(self.zxy[i,self.j_pfr[1:8]]-self.zxy[i,self.j_pfr[0:7]])**2) 
-        #     self.dl[i,self.j_pfr[7]]=self.dl[i,self.j_pfr[6]]
+        # for the private flux region and closed flux surfaces, estimate 
+        # the distances separately
+        for i in range(self.ixsep):
+            self.dl[i,self.j_cfs]=np.sqrt((self.rxy[i,self.j_cfs+1]-self.rxy[i,self.j_cfs])**2 + (self.zxy[i,self.j_cfs+1]-self.zxy[i,self.j_cfs])**2) 
+            self.dl[i,self.jyseps22]=np.sqrt((self.rxy[i,self.jyseps11+1]-self.rxy[i,self.jyseps22])**2+(self.zxy[i,self.jyseps11+1]-self.zxy[i,self.jyseps22])**2) 
+            self.dl[i,self.j_pfr[0:7]]=np.sqrt((self.rxy[i,self.j_pfr[1:8]]-self.rxy[i,self.j_pfr[0:7]])**2+(self.zxy[i,self.j_pfr[1:8]]-self.zxy[i,self.j_pfr[0:7]])**2) 
+            self.dl[i,self.j_pfr[7]]=self.dl[i,self.j_pfr[6]]
 
-        # # For the SOL, integrating the flux surfaces is made easier
-        # for i in range(self.ixsep,self.nx):
-        #     self.dl[i,0:self.ny-1]=np.sqrt((self.rxy[i,1:self.ny]-self.rxy[i,0:self.ny-1])**2+(self.zxy[i,0:self.ny-1]-self.zxy[i,1:self.ny])**2) 
+        # For the SOL, integrating the flux surfaces is made easier
+        for i in range(self.ixsep,self.nx):
+            self.dl[i,0:self.ny-1]=np.sqrt((self.rxy[i,1:self.ny]-self.rxy[i,0:self.ny-1])**2+(self.zxy[i,0:self.ny-1]-self.zxy[i,1:self.ny])**2) 
 
     def calc_profiles_from_map(self, mgrid):
         '''
@@ -342,6 +342,30 @@ class Bout(Static_grid):
                                            edgecolors='black',
                                            linewidths=0.01,
                                            alpha=1.0)
+            # else:
+            #     rxy_centers = grid["Rxy"]
+            #     zxy_centers = grid["Zxy"]
+                
+            #     bverts = []
+            #     # Loop over each cell center to calculate corner points
+            #     for i in range(grid["nx"] - 1):  # Exclude last row for corner estimation
+            #         for j in range(grid["ny"] - 1):  # Exclude last column for corner estimation
+            #             # Approximate corners by averaging adjacent cell centers
+            #             x0, y0 = rxy_centers[i, j], zxy_centers[i, j]         # Current cell center
+            #             x1, y1 = rxy_centers[i + 1, j], zxy_centers[i + 1, j] # Below cell center
+            #             x2, y2 = rxy_centers[i + 1, j + 1], zxy_centers[i + 1, j + 1] # Diagonal cell center
+            #             x3, y3 = rxy_centers[i, j + 1], zxy_centers[i, j + 1] # Right cell center
+                
+            #             # Define the corners of the current grid cell (clockwise or counter-clockwise)
+            #             corners = [(x0, y0), (x3, y3), (x2, y2), (x1, y1)]
+            #             bverts.append(corners)
+                        
+            #     # for verts in bverts:
+            #     #     for point in verts:
+            #     #         plt.scatter(point[0], point[1], c='b')
+            #     #         plt.scatter(point[0], point[1], c='r')
+            #     # plt.show()
+            #     # print("done")
             else:
                 raise ValueError("Older BOUT++ grid detected. Please use python hypnotoad version of BOUT++ grid!")
                 
