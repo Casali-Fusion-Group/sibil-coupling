@@ -513,17 +513,7 @@ class Bout(Static_grid):
             grid.write("Neexp", self.ne/density_units,info=True)
             grid.write("Tiexp", self.Ti,info=True)
             grid.write("Teexp", self.Te,info=True)
-            grid.write("P", np.multiply(self.Ti, self.ni) * ev_to_J +  np.multiply(self.Te * ev_to_J, self.ni),info=True)
-            grid.write("pressure", np.multiply(self.Ti, self.ni) * ev_to_J  +  np.multiply(self.Te * ev_to_J , self.ni),info=True)
             grid.write("pressure_s", np.multiply(self.Ti, self.ni) * ev_to_J  +  np.multiply(self.Te * ev_to_J , self.ni),info=True)
-
-                
-            # grid.write("Ni", self.ni/ni_units,info=True)
-            # grid.write("Ne", self.ne/ni_units,info=True)
-            # grid.write("Ti", self.Ti,info=True)
-            # grid.write("Te", self.Te,info=True)
-            #grid.write("Tiexp", np.maximum(self.Ti,0.001),info=True)
-            #grid.write("Teexp", np.maximum(self.Te,0.001),info=True)
                 
 def fix_until_positive(values, x=None, threshold=0):
     """

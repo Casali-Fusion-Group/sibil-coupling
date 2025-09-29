@@ -64,7 +64,6 @@ class BASICS_Mapper:
         # radial SOLPS splines, then poloidal mapping splines to define the
         # BOUT++ grid.
         self.bout.calc_profiles_from_map(self.map)
-        self.bout.fix_midplane_and_pfr()
         self.bout.smooth_profiles()
         self.bout.ne = self.bout.ni
         
