@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Nov 14 11:43:14 2024
+
+@author: ttaczak
+"""
+
+from boutdata.collect import collect
+from boutdata.data import BoutData
+from boututils.datafile import DataFile
+import warnings
+import os
+import sys
+from pathlib import Path
+import matplotlib.patches as patches
+
+import numpy as np
+import matplotlib.pyplot as plt
+import numpy.ma as ma
+from BoutPlot_cluster import bout_plot
+import matplotlib.colors as mcolors
+import argparse
+import time
+from PlotPDF import to_pdf
+from PlotPNG import to_png
+import datetime
+
+def plot_trimmed_matrix(matrix, 
+                        masked=True,
+                        string="title", 
+                        mask_percent=5, 
+                        scale="linear",
+                        plotting_dir=None, 
+                        dpi=800,
+                        show_plot=False,
+                        output_type="PDF",
+                        suppress_warnings=False):
+    """
+    Plots a matrix with the top and bottom `mask_percent` percent of values masked, 
+    along with NaNs, and scales the color bar based only on the unmasked values.
+    
+    Parameters:
+        matrix (numpy.ndarray): The input 2D array.
+        mask_percent (float): The percentage of extreme values (top and bottom) to mask.
+    """
+    scratch = os.environ.get("$SCRATCH")
+    plotting_dir = Path(f"{scratch}/plots")
+    print(plotting_dir)
+    if not plotting_dir and not show_plot:
+        raise Exception("Could not find {plotting_dir} and show_plot is {show_plot}!")
+    elif not plotting_dir:
+        if not suppress_warnings: warnings.warn("Could not find {plotting_dir}! Using plt.show() instead -> can be VERY slow on NERSC!")
+    
+    matrix = np.array(matrix, dtype=np.float64)  # Ensure it's a float array
+
+    # Flattened array without NaNs for percentile calculations
+    valid_values = matrix[~np.isnan(matrix)]
+
+    if valid_values.size == 0:
+        raise ValueError("Matrix contains only NaNs, nothing to plot.")
+
+    # Calculate percentile thresholds
+    lower_bound = np.percentile(valid_values, mask_percent)
+    upper_bound = np.percentile(valid_values, 100 - mask_percent)
+
+    # Create a masked array: Mask NaNs and extreme values
+    masked_matrix = ma.masked_where(
+        ~((matrix < lower_bound) | (matrix > upper_bound) | np.isnan(matrix)), 
+        matrix
+    )
+    
+    
+    # Define colormap and ensure masked values are distinct
+    cmap = plt.cm.viridis
+    cmap.set_bad(color='white')  # Set masked areas to white
+
+    # Plot the matrix
+    fig, ax = plt.subplots()
+    
+    nrows, ncols = matrix.shape
+    
+    # Create x and y coordinate grids
+    x = np.arange(ncols + 1)
+    y = np.arange(nrows + 1)
+    
+
+    
+    if masked:
+        if scale == "log":
+            norm = mcolors.LogNorm(vmin=np.nanmin(masked_matrix), vmax=np.nanmax(masked_matrix))
+        else:
+            norm = mcolors.Normalize(vmin=np.nanmin(masked_matrix), vmax=np.nanmax(masked_matrix))
+        ax.set_title(f"{string} with {mask_percent}% Extreme Values Masked")
+        mesh = ax.pcolormesh(x, y, masked_matrix[::-1, :], cmap=cmap, norm=norm, shading='auto')
+            
+    else:        
+        if scale == "log":
+            norm = mcolors.LogNorm(vmin=np.nanmin(matrix), vmax=np.nanmax(matrix))
+        else:
+            norm = mcolors.Normalize(vmin=np.nanmin(matrix), vmax=np.nanmax(matrix))
+        ax.set_title(f"{string} computational grid")
+        mesh = ax.pcolormesh(x, y, matrix[::-1, :], cmap=cmap, norm=norm, shading='auto')
+    
+    ax.set_aspect('equal')
+    ax.set_title(string)
+    # ax.axis('off')
+
+    cbar = fig.colorbar(mesh, ax=ax)
+        
+    # square plot
+    ax.set_aspect(1.0/ax.get_data_ratio(), adjustable='box')
+    
+    # if show_plot:
+    #     plt.show()
+
+    return fig
+        
+
+def find_file(target):
+    return next(Path('.').rglob(target), None)
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+if __name__ == "__main__":
+    
+    default_vars = ["Ni","Ti","Te","N0","Ti0","Te0","Vexbx", "Vexby", "Vexbz", "Vbtildx", "Vbtildy", "Vbtildz","phi","Psi"]#, "Ve0_diax", "Ve0_diay", "Ve0_diaz"]
+    
+    ### Define the time index and percent of matrix to be masked ###
+    parser = argparse.ArgumentParser(prog="plot_matrix_masks",description='Plotting inputs for matrix masks')
+    parser.add_argument("-t", "--t_ind", default=-1, type=int, help="The time index to be plotted for %(prog)s\n(default: %(default)s)")
+    parser.add_argument('-m', '--masked', type=str2bool, help="True to mask, False for full matrix")
+    parser.add_argument("-P", "--percent", default=5, type=float, help="The max and min precentage of the matrix to be masked for %(prog)s.\n(default: %(default)s)")
+    parser.add_argument("-s", "--scale", default="linear",type=str, help="The max and min precentage of the matrix to be masked for %(prog)s.\n(default: %(default)s)")
+    parser.add_argument("-o", "--output_type", default="PDF",type=str, help="Output the plots as either one large 'PDF' or as seperate 'PNG' figures stored in $SCRATCH/plots")
+    parser.add_argument("-d", "--display", default=bool(False), type=bool, help="Pass true if you wish to directly display the plot and false if note. Accepts 'True' and 'False' only")
+    
+    
+    ### Verify data file names and locations ###
+    parser.add_argument("-p", "--path", type=Path, default=Path("."), help="The path to the data directory (NOT THE NUMPY DIRECTORY).\n(default: \"%(default)s\"")
+    parser.add_argument("-g","--grid", type=Path, default=Path("d3d_184016.3200_psi092108_nx260ny64.nc"), help="The grid file name, assumes the grid is in the data directory.\n(default: \"%(default)s\"")   
+    parser.add_argument("-v","--vars", nargs="*", default=default_vars, help="Variables from BOUT++ to be saved.\n(default: %(default)s")
+    parser.print_help()
+    args = parser.parse_args()
+    
+    # If running as a script on the cluster
+    data_dir = args.path
+    # Extract the bout grid name from the input file, expanding $BGRIDS alias is present
+    with open("BOUT.inp") as f:
+        for line in f:
+            if "grid =" in line:
+                start = line.find('"') + 1
+                end = line.rfind('"')
+                path_with_BGRIDS = line[start:end]  # Extract string inside quotes
+                grid_fname = Path(os.path.expandvars(path_with_BGRIDS))
+                break  # Stop after first match
+
+
+    print(f"Using data_dir: {data_dir}")
+    print(f"Using grid: {grid_fname}")
+
+    numpy_dir = data_dir / "numpy"
+    if not os.path.isdir(numpy_dir):
+        print(f"'{numpy_dir}' does not exist. Please run BoutSaveData to create '{numpy_dir}' first.")
+        raise ValueError(f"Did not find numpy folder in {data_dir}!")
+    
+    vars_to_be_plotted=[] # used to eliminate vars that were not found in the save file dirs
+    for var in args.vars:
+        data_file = numpy_dir / (var + ".npy")
+        if not os.path.isfile(data_file) :
+            print(f"Did not find {var} in {numpy_dir}!!")
+            warnings.warn(f"Did not find {var} in {numpy_dir} required to make plots!! Run 'bout_save_data'")
+        else:
+            vars_to_be_plotted.append(var)
+            
+    if len(vars_to_be_plotted) == 0:
+        raise ValueError(f"No requested variables found in the {numpy_dir} folder! Exiting...")
+            
+    ### Collect relevant data to make plots ###
+    
+    # Collect grid quantities
+    d = BoutData(path=data_dir)
+    t = d["outputs"]["t"].shape[0]
+    nx = d["outputs"]["nx"]
+    ny = d["outputs"]["ny"]
+    nz = d["outputs"]["nz"]
+    
+    with DataFile(str(grid_fname)) as g:
+        Rxy = g["Rxy"]
+        Zxy = g["Zxy"]
+        Bpxy = g["Bpxy"]
+        Btxy = g["Btxy"]
+        
+    if args.output_type == "PNG":
+        for var in vars_to_be_plotted:
+            print("Starting to plot {} at {:.4f}".format(var,time.time()))
+            var_mat = np.load(numpy_dir / (var+".npy"))
+            if len(var_mat.shape) == 4:
+                var_mat = np.sum(var_mat[args.t_ind,:,:,:],axis=2)/var_mat.shape[2]
+            elif len(var_mat.shape) == 3:
+                var_mat = var_mat[args.t_ind, :, :]
+            elif len(var_mat.shape) == 2:
+                var_mat = var_mat
+            else:
+                raise ValueError(f"Var improperly shaped. Dim(var) = {len(var_mat.shape)}!")
+                    
+            print(f"Plotting data for {var}")
+            fig = plot_trimmed_matrix(var_mat,
+                                      masked=args.masked,
+                                      string=var,
+                                      mask_percent=args.percent,
+                                      scale=args.scale,
+                                      show_plot=args.display,
+                                      output_type=args.output_type)
+            to_png([fig])
+            plt.close(fig)
+            
+    elif args.output_type == "PDF":
+        
+        timestamp = datetime.datetime.now().strftime("%m-%d-%Y_%H-%M")
+        current_folder = os.path.basename(os.getcwd())
+        figs = []
+        for var in vars_to_be_plotted:
+            
+            print(f"Starting to plot {var} \tat {current_folder}_MM_{timestamp}")
+            var_mat = np.load(numpy_dir / (var+".npy"))
+            if len(var_mat.shape) == 4:
+                var_mat = np.sum(var_mat[args.t_ind,:,:,:],axis=2)/var_mat.shape[2]
+            elif len(var_mat.shape) == 3:
+                var_mat = var_mat[args.t_ind, :, :]
+            elif len(var_mat.shape) == 2:
+                var_mat = var_mat
+            else:
+                raise ValueError(f"Var improperly shaped. Dim(var) = {len(var_mat.shape)}!")
+            
+            fig = plot_trimmed_matrix(var_mat,
+                                      masked=args.masked,
+                                      string=var,
+                                      mask_percent=args.percent,
+                                      scale=args.scale,
+                                      show_plot=args.display,
+                                      output_type=args.output_type)
+            figs.append(fig)
+
+        plot_name = f'{current_folder}_MM_{timestamp}.pdf'
+        to_pdf(figs,f'{plot_name}')
+            
+    

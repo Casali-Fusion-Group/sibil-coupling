@@ -1,0 +1,12 @@
+#!/bin/bash
+
+n_iter = $1
+DIR = $2
+
+for i in $(seq 1 $n_iter); do
+    echo "Submitting job iteration $i"
+    bout_run $DIR
+    echo "Job iteration $i complete."
+    sleep 1
+echo "BOUT++ run finished."
+done

@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Apr  8 11:33:56 2025
+
+@author: ttaczak
+"""
+from boutdata.collect import collect
+from boutdata.data import BoutData
+from boututils.datafile import DataFile
+import warnings
+import os
+import sys
+from pathlib import Path
+import numpy as np
+import argparse
+
+def find_file(target):
+    return next(Path('.').rglob(target), None)
+
+
+def bout_save_data(data_dir,grid_fname,var_names):
+    numpy_dir = data_dir + "/numpy/"
+    if os.path.isdir(data_dir):
+        os.makedirs(numpy_dir, exist_ok=True)
+    else:
+        print(f"'{data_dir}' does not exist. Skipping creation of '{numpy_dir}'.")
+        raise ValueError(f"Data dir {data_dir} not found!")
+    
+    d = BoutData(path=data_dir)
+    
+    t_ind = -1 # Time index used for average quantities
+    
+    with DataFile(grid_fname) as g:
+        Rxy = g["Rxy"]
+        Zxy = g["Zxy"]
+        Bpxy = g["Bpxy"]
+        Btxy = g["Btxy"]
+        
+    diffusion_required_outputs = ["N0", "Ni", "Ti", "Ti0", "Te", "Te0"]#, "Va","Vexbx", "Vbtildx", "Vexby", "Vbtildy", "Vexbz", "Vbtildz"]
+    calc_diffusion_coeffs = True
+    for output in diffusion_required_outputs:
+        if not output in d["outputs"].keys() :
+            print(f"Did not find {output}!!")
+            warnings.warn("BOUT++ Output files do not contain all information required to calculate diffusion coefficients.")
+            calc_diffusion_coeffs = False
+    
+    all_outputs = d['outputs'].keys()
+    raw_outputs = {}
+    
+    print("Starting to collect variables.")
+    if var_names[0] == 'All':
+        All = True
+    else:
+        All = False
+    to_remove = []# 'run_restart_from', 'sink_vp', 'sp_length', 'sp_width', 't_array', 'tt', 'use_backtrace', 'use_check_level', 'use_color', 'use_metric_3d', 'use_msgstack', 'use_openmp', 'use_openmp_schedule', 'use_output_debug', 'use_sigfpe', 'use_signal', 'use_track', 'zShift', 'zperiod', 'ncalls', 'ncalls_e', 'ncalls_i', 'wall_time', 'wtime', 'wtime_comms', 'wtime_invert', 'wtime_io', 'wtime_per_rhs', 'wtime_per_rhs_e', 'wtime_per_rhs_i', 'wtime_rhs', 't']
+    all_outputs = [item for item in all_outputs if not any(sub in item for sub in to_remove)]
+    
+    # Find all of the outputs requested in the output list
+    common_outputs = set(all_outputs) & set(diffusion_required_outputs)
+    
+    print("Saving: ", end="" ,flush=True)
+    if All:
+        for var in all_outputs:
+            print(f"{var}", end="")
+            var_fname = Path(numpy_dir + var + ".npy")
+            # Collect All relevant quantities
+            if var_fname.exists():
+                print(" (exists), ", end="",flush=True)
+                raw_outputs[var] = np.load(var_fname)
+            else:
+                raw_outputs[var] = collect(f"{var}", path=data_dir, info=False)
+                np.save(var_fname,raw_outputs[var])
+                print(" (exists), ", end="",flush=True)
+            
+    else:
+        
+        # Output the common elements
+        for var in common_outputs:
+            if var == "run_restart_from":
+                continue
+            # Collect All relevant quantities
+            if var_fname.exists():
+                print(" (exists), ", end="")
+                raw_outputs[var] = np.load(var_fname)
+            else:
+                raw_outputs[var] = collect(f"{var}", path=data_dir, info=False)
+                np.save(var_fname,raw_outputs[var])
+                print(", ", end="")
+    
+    print()
+    print("Calculating derived quantities. Averages use the last timestep!")
+    
+    derived_outputs = {}
+    print("Calculating txy profiles.")
+    if ("Ni" in common_outputs and "N0" in common_outputs):
+        ni0 = raw_outputs["N0"]
+        ni = raw_outputs["Ni"]
+        ni_txy = ni0[:,:] + np.sum(ni[:,:,:,:], axis=3)/ni[:,:,:,:].shape[3]
+        ni_xy = np.sum(ni_txy[t_ind,:,:],axis=0)/ni_txy.shape[0]
+        derived_outputs["ni_txy"] = ni_txy
+        derived_outputs["ni_xy"] = ni_xy
+    if "Ti0" in common_outputs and "Ti" in common_outputs:
+        Ti0 = raw_outputs["Ti0"]
+        Ti = raw_outputs["Ti"]
+        Ti_txy = Ti0[:,:] + np.sum(Ti[:,:,:,:], axis=3)/Ti[:,:,:,:].shape[3] 
+        Ti_xy = np.sum(Ti_txy[t_ind,:,:],axis=0)/Ti_txy.shape[0]
+        derived_outputs["Ti_txy"] = Ti_txy
+        derived_outputs["Ti_xy"] = Ti_xy
+    if "Te0" in common_outputs and "Te" in common_outputs:
+        Te0 = raw_outputs["Te0"]
+        Te = raw_outputs["Te"]
+        Te_txy = Te0[:,:] + np.sum(Te[:,:,:,:], axis=3)/Te[:,:,:,:].shape[3]
+        Te_xy = np.sum(Te_txy[t_ind,:,:],axis=0)/Te_txy.shape[0]
+        derived_outputs["Te_txy"] = Te_txy
+        derived_outputs["Te_xy"] = Te_xy
+    
+    if "Ni" in common_outputs:
+        ni = raw_outputs["Ni"]
+        ni_turb_txy = np.sum(ni[:,:,:,:], axis=3)/ni[:,:,:,:].shape[3]
+        derived_outputs["ni_turb_txy"] = ni_turb_txy
+    if "Ti" in common_outputs:
+        Ti = raw_outputs["Ti"]
+        Ti_turb_txy = np.sum(Ti[:,:,:,:], axis=3)/Ti[:,:,:,:].shape[3] 
+        derived_outputs["Ti_turb_txy"] = Ti_turb_txy
+    if "Te" in common_outputs:
+        Te = raw_outputs["Te"]
+        Te_turb_txy = np.sum(Te[:,:,:,:], axis=3)/Te[:,:,:,:].shape[3]
+        derived_outputs["Te_turb_txy"] = Te_turb_txy
+
+    if "Vexbx" in common_outputs:
+        Vexbx = raw_outputs["Vexbx"]
+        Vexbx_txy = np.sum(Vexbx[:,:,:,:], axis=3)/Vexbx[:,:,:,:].shape[3]
+        Vexbx_xy = np.sum(Vexbx_txy[t_ind,:,:],axis=0)/Vexbx_txy.shape[0]
+        derived_outputs["Vexbx_txy"] = Vexbx_txy
+        derived_outputs["Vexbx_xy"] = Vexbx_xy
+    if "Vexby" in common_outputs:
+        Vexby = raw_outputs["Vexby"]
+        Vexby_txy = np.sum(Vexby[:,:,:,:], axis=3)/Vexby[:,:,:,:].shape[3]    
+        Vexby_xy = np.sum(Vexby_txy[t_ind,:,:],axis=0)/Vexby_txy.shape[0]
+        derived_outputs["Vexby_txy"] = Vexby_txy
+        derived_outputs["Vexby_xy"] = Vexby_xy
+    if "Vexbz" in common_outputs:
+        Vexbz = raw_outputs["Vexbz"]  
+        Vexbz_txy = np.sum(Vexbz[:,:,:,:], axis=3)/Vexbz[:,:,:,:].shape[3]
+        Vexbz_xy = np.sum(Vexbz_txy[t_ind,:,:],axis=0)/Vexbz_txy.shape[0]
+        derived_outputs["Vexbz_txy"] = Vexbz_txy
+        derived_outputs["Vexbz_xy"] = Vexbz_xy
+    
+
+    if "Vbtildx" in common_outputs:
+        Vbtildx = raw_outputs["Vbtildx"]
+        Vbtildx_txy = np.sum(Vbtildx[:,:,:,:], axis=3)/Vbtildx[:,:,:,:].shape[3]
+        Vbtildx_xy = np.sum(Vbtildx_txy[t_ind,:,:],axis=0)/Vbtildx_txy.shape[0]
+        derived_outputs["Vbtildx_txy"] = Vbtildx_txy
+        derived_outputs["Vbtildx_xy"] = Vbtildx_xy
+    if "Vbtildy" in common_outputs:
+        Vbtildy = raw_outputs["Vbtildy"]
+        Vbtildy_txy = np.sum(Vbtildy[:,:,:,:], axis=3)/Vbtildy[:,:,:,:].shape[3]
+        Vbtildy_xy = np.sum(Vbtildy_txy[t_ind,:,:],axis=0)/Vbtildy_txy.shape[0]
+        derived_outputs["Vbtildy_txy"] = Vbtildy_txy
+        derived_outputs["Vbtildy_xy"] = Vbtildy_xy
+    if "Vbtildz" in common_outputs:
+        Vbtildz = raw_outputs["Vbtildz"]
+        Vbtildz_txy = np.sum(Vbtildz[:,:,:,:], axis=3)/Vbtildz[:,:,:,:].shape[3]
+        Vbtildz_xy = np.sum(Vbtildz_txy[t_ind,:,:],axis=0)/Vbtildz_txy.shape[0]
+        derived_outputs["Vbtildz_txy"] = Vbtildz_txy
+        derived_outputs["Vbtildz_xy"] = Vbtildz_xy
+
+    if calc_diffusion_coeffs:
+        print("Calculating diffusion coefficient profiles.")
+        dndr = np.zeros_like(ni_txy)
+        dTidr = np.zeros_like(Ti_txy)
+        dTedr = np.zeros_like(Te_txy)
+    
+        dr = np.zeros_like(ni_txy)
+        dn = np.zeros_like(ni_txy)
+        dTi = np.zeros_like(Ti_txy)
+        dTe = np.zeros_like(Te_txy)
+    
+        for t in range(ni.shape[0]):
+            for i, (r,z,n_) in enumerate(zip(Rxy.T, Zxy.T, ni_txy[t_ind,:,:].T)):
+                dri = np.abs(average_distances(r,z))
+                dndr[t,:,i] = np.abs(np.gradient(n_,dri))
+                dr[t,:,i] = np.abs(dri)
+                dn[t,:,i] = np.abs(np.gradient(n_))
+            for i, (r,Ti_) in enumerate(zip(Rxy.T, Ti_txy[t,:,:].T)):
+                dTidr[t,:,i] = np.abs(np.gradient(Ti_,average_distances(r,z)))
+                dTi[t,:,i] = np.abs(np.gradient(Ti_))
+            for i, (r,Te_) in enumerate(zip(Rxy.T, Te_txy[t,:,:].T)):
+                dTedr[t,:,i] = np.abs(np.gradient(Te_,average_distances(r,z)))
+                dTe[t,:,i] = np.abs(np.gradient(Te_))
+            
+        derived_outputs["dndr"] = dndr
+        derived_outputs["dTidr"] = dTidr
+        derived_outputs["dTedr"] = dTedr
+        derived_outputs["dr"] = dr
+        derived_outputs["dn"] = dn
+        derived_outputs["dTi"] = dTi 
+        derived_outputs["dTe"] = dTe
+        
+    
+    print("Saving All data as numpy binary files.")
+    
+    for name, var in derived_outputs.items():
+        var_fname = numpy_dir + name + ".npy"
+        np.save(var_fname,var)
+        
+
+def average_distances(r,z):
+    """
+    Computes the average spacing between each grid point in a 1D array.
+    
+    Parameters:
+        r (numpy.ndarray): 1D array of grid points (sorted or unsorted).
+    
+    Returns:
+        numpy.ndarray: 1D array of average spacing at each grid point.
+    """
+    r = np.asarray(r)  # Ensure it's a NumPy array
+    z = np.asarray(z)  # Ensure it's a NumPy array
+    
+    # Compute forward and backward differences
+    forward_diff_r = np.diff(r,append=0)  # Left difference
+    backward_diff_r = np.diff(np.roll(r,1),append=0)  # Right difference
+    
+    forward_diff_z = np.diff(z,append=0)  # Left difference
+    backward_diff_z = np.diff(np.roll(z,1),append=0)  # Right difference
+    
+    forward_dists = np.sqrt(forward_diff_r**2 + forward_diff_z**2)
+    backward_dists = np.sqrt(backward_diff_r**2 + backward_diff_z**2)
+
+    # Compute the average spacing for interior points
+    avg_spacing = (forward_dists + backward_dists) / 2
+
+    # Handle first and last elements separately
+    avg_spacing[0] = np.sqrt((r[1] - r[0])**2 + (z[1]-z[0])**2)   # First point
+    avg_spacing[-1] = np.sqrt((r[-1] - r[-2])**2 + (z[-1]-z[-2])**2) # Last point
+    
+    return avg_spacing
+    
+if __name__ == "__main__":
+    
+    ### Define the time index and percent of matrix to be masked ###
+    parser = argparse.ArgumentParser(prog="bout_save_data",description='Collecting the given outputs form BOUT++ and saves them as numpy arrays')
+    
+    ### Verify data file names and locations ###
+    parser.add_argument("-p", "--path", type=Path, default=Path("."), help="The path to the data directory (NOT THE NUMPY DIRECTORY).\n(default: \"%(default)s\"")
+    # parser.add_argument("-g","--grid", type=Path, default=Path("d3d_184016.3200_psi092108_nx260ny64.nc"), help="The grid file name, assumes the grid is in the data directory.\n(default: \"%(default)s\"")   
+    parser.add_argument("-v","--vars", nargs="*", default=["All"], help="Variables from BOUT++ to be saved.\n(default: %(default)s")
+    parser.print_help()
+    args = parser.parse_args()
+    
+    # If running as a script on the cluster
+    data_dir = args.path
+    # grid_fname = args.path / args.grid
+    
+    # Read the file
+    with open("BOUT.inp") as f:
+        for line in f:
+            if "grid =" in line:
+                start = line.find('"') + 1
+                end = line.rfind('"')
+                path_with_BGRIDS = line[start:end]  # Extract string inside quotes
+                grid_fname = Path(os.path.expandvars(path_with_BGRIDS))
+                break  # Stop after first match
+
+    if not data_dir or not grid_fname:
+        print("Missing required files!")
+        sys.exit(1)
+    
+    print(f"Using data_dir: {data_dir.resolve()}")
+    print(f"Using grid: {grid_fname.resolve()}")
+    data_dir = str(data_dir)
+    grid_fname = str(grid_fname)
+    
+    bout_save_data(data_dir,grid_fname,args.vars)

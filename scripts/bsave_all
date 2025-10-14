@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Loop over directories starting with "$1"
+grid_file=$(ls d3d*.nc | head -n 1)
+bout_save_data -g "$file"
+bout_save_data -g "$file"
+bout_save_data -g "$file"
+bout_save_data -g "$file"
+bout_matrix_masks -g "$file"
+bout_time_traces
+bout_2d_profiles

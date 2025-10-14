@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Apr  8 09:06:00 2025
+
+@author: ttaczak
+"""
+
+import matplotlib.pyplot as plt
+from Readers.BOUT_Reader import BOUT_data
+import numpy as np
+import matplotlib.colors as mcolors
+import warnings
+import os
+from pathlib import Path
+import sys
+from BoutPlot_cluster import bout_plot
+from boututils.datafile import DataFile
+from boutdata.data import BoutData
+import argparse
+import time
+from PlotPDF import to_pdf
+
+def bout_timetrace(bgrid_file_loc, 
+                   values, 
+                   titles=["title"], 
+                   x_axis = r'$R(m)$',
+                   dpi=300,
+                   scale="linear", 
+                   linthresh=1e18, 
+                   choord = "OMP",
+                   show_plot=False,
+                   output_type="PDF",
+                   suppress_warnings=False):
+    '''
+    Plots a time trace of the desired quantity at the midplane
+
+    Parameters
+    ----------
+    bgrid_file_loc : TYPE
+        DESCRIPTION.
+    val : TYPE
+        Variable to be plotted. If 2D, assumes the variable is in dimensions 
+        of time and R. If 3D, assumes (t,x,y). If 4D, assumes (t,x,y,z).
+    title : TYPE, optional
+        DESCRIPTION. The default is "title".
+    x_axis : TYPE, optional
+        DESCRIPTION. The default is r'$R(m)$'.
+    y_axis : TYPE, optional
+        DESCRIPTION. The default is r'$Z(m)$'.
+    dpi : TYPE, optional
+        DESCRIPTION. The default is 300.
+    scale : TYPE, optional
+        Type of scale for the graph. Currently accepted options are
+        "log" or "symlog." The default is "linear".
+
+    Returns
+    -------
+    None.
+
+    '''
+    loc_scratch = os.environ.get("$SCRATCH")
+    plotting_dir = Path(f"{loc_scratch}/plots")
+
+    bout=BOUT_data(bgrid_file_loc)
+    rxy = bout.Rxy 
+    nx,ny=bout.Rxy.shape # here (x,y)=(radial,poloidal)
+    if choord == "OMP":
+        jomp=np.argmax(rxy[0,:])
+        y_val = jomp
+    else:
+        y_val = choord
+    
+    n_rows = len(values)
+    height_per_row = 2
+    n_cols = 1
+    width_per_col = 6
+    fig, axs = plt.subplots(n_rows,n_cols,figsize=(n_cols * width_per_col, n_rows * height_per_row), dpi=dpi)
+    for ax,val,title in zip(np.atleast_1d(axs),values,titles):
+        var_2D = None         # reformats the variable into the form (t,val)
+        # Reduce data to 1D
+        shape = val.shape
+        if len(shape) == 2:
+            var_2D = val
+        elif len(shape) == 3:
+            var_2D = val[:,:,y_val]
+        elif len(shape) == 4:
+            # Toroidally averages the values over the z axis at the given y_ind
+            var_2D = np.sum(val[:,:,y_val,:], axis=2)/val[:,:,y_val,:].shape[2]
+        else:
+            raise ValueError(f"Value passed in to be plotted is not of the correct \
+                             dimensions ({val.shape()} != (2,3,4)")
+        
+        xr = np.arange(0,var_2D.shape[1])
+        
+        for tim, trace in enumerate(var_2D):
+            ax.plot(xr,trace,label=f"{tim}")
+        
+        # Apply log scale if requested
+        if scale == "log":
+            ax.set_yscale('log')
+        elif scale=="symlog":
+            ax.set_yscale('symlog',linthresh=linthresh)
+        
+        ax.set_xlabel(f"{x_axis}")
+        ax.set_ylabel(f"{title}")
+        
+        #ax.legend()
+    fig.suptitle(f"Profiles at y_ind = {choord}")
+    if show_plot:
+        plt.show()
+        
+    plot_name = "bout_timetraces_".join(titles) + "_{:.4f}".format(time.time())
+        
+    #save_name = 'bout_timetraces_{:.4f}.png'.format(time.time())
+    if output_type == "PNG":
+        plot_loc = plotting_dir + plot_name + ".png"
+        plt.savefig(plot_loc, dpi=dpi, bbox_inches='tight')
+        plt.close()
+        print(f"Successfully plotted {plot_name} at {plotting_dir}")
+    elif output_type == "PDF":
+        to_pdf(fig,filename = plot_name + ".pdf",scratch=True)
+        print(f"Successfully saved {plot_name}!")
+        plt.close()
+    
+if __name__=="__main__":
+    # Define all arguments from argparse
+    default_vars = ["ni_txy","Ti_txy","Te_txy"]
+    
+    ### Define the time index and percent of matrix to be masked ###
+    parser = argparse.ArgumentParser(prog="bout_time_traces",description='Plotting profiles in changing time')
+    parser.add_argument("-t", "--t_ind", nargs=1, default=-1, help="The time index to be plotted for %(prog)s\n(default: %(default)s)")
+    parser.add_argument("-c", "--choord", nargs=1, default="OMP", help="Poloidal index or 'OMP' for outher midplane for %(prog)s.\n(default: %(default)s)")
+    parser.add_argument("-s", "--scale", nargs=1, default="linear", help="The max and min precentage of the matrix to be masked for %(prog)s.\n(default: %(default)s)")
+    parser.add_argument("-o", "--output_type", nargs=1, default="PDF", help="Output the plots as either one large 'PDF' or as seperate 'PNG' figures stored in $SCRATCH/plots")
+    parser.add_argument("-d", "--display", nargs=1, default=False, help="Pass true if you wish to directly display the plot and false if note. Accepts 'True' and 'False' only")
+    
+    ### Verify data file names and locations ###
+    parser.add_argument("-p", "--path", type=Path, default=Path("."), help="The path to the data directory (NOT THE NUMPY DIRECTORY).\n(default: \"%(default)s\"")
+    parser.add_argument("-g","--grid", type=Path, default=Path("d3d_184016.3200_psi092108_nx260ny64.nc"), help="The grid file name, assumes the grid is in the data directory.\n(default: \"%(default)s\"")   
+    parser.add_argument("-v","--vars", nargs="*", default=default_vars, help="Variables from BOUT++ to be saved.\n(default: %(default)s")
+    parser.print_help()
+    args = parser.parse_args()
+    
+    # If running as a script on the cluster
+    data_dir = args.path
+    grid_fname = args.path / args.grid
+
+    print(f"Using data_dir: {data_dir}")
+    print(f"Using grid: {grid_fname}")
+    
+    numpy_dir = data_dir / "numpy"
+    if not os.path.isdir(numpy_dir):
+        print(f"'{numpy_dir}' does not exist. Please run BoutSaveData to create '{numpy_dir}' first.")
+        raise ValueError(f"Did not find numpy folder in {data_dir}!")
+    
+    for var in args.vars:
+        data_file = numpy_dir / (var + ".npy")
+        if not os.path.isfile(data_file) :
+            print(f"Did not find {var} in {numpy_dir}!!")
+            warnings.warn("BOUT++ Output files do not contain {var} required to create matrix plots.")
+            
+    ### Collect relevant data to make plots ###
+    
+    # Collect grid quantities
+    d = BoutData(path=data_dir)
+    t = d["outputs"]["t"].shape[0]
+    nx = d["outputs"]["nx"]
+    ny = d["outputs"]["ny"]
+    nz = d["outputs"]["nz"]
+    
+    mats = []
+    titles = []
+    for var_name in args.vars:
+        var_mat = np.load(numpy_dir / (var_name + ".npy"))
+        if len(var_mat.shape) == 4:
+            var_mat_avg = np.sum(var_mat[:,:,:,:],axis=2)/var_mat.shape[2]
+            mats.append(var_mat_avg)
+            titles.append(var_name)
+        elif len(var_mat.shape) == 3:
+            mats.append(var_mat)
+            titles.append(var_name)
+        elif len(var_mat.shape) == 2:
+            warnings.warn(f"Matrix {var_name} has no time dimension! Plotting 2D profile instead!")
+            bout_plot(grid_fname, var_mat, title=var_name)
+        elif len(var_mat.shape) == 1:
+            continue
+        else:
+            raise ValueError(f"Var improperly shaped. Dim({var}) = {len(var_mat.shape)}!")
+    
+    # Sanity check: Print matrix shapes
+    for title, mat in zip(titles, mats):
+        print(f"{title} shape: ", mat.shape)
+        
+    bout_timetrace(grid_fname,mats,titles,choord=args.choord,show_plot=args.display,output_type=args.output_type)
+    

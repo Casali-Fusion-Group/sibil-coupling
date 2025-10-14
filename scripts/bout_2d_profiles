@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Nov 14 11:43:14 2024
+
+@author: ttaczak
+"""
+
+from boutdata.collect import collect
+from boutdata.data import BoutData
+from boututils.datafile import DataFile
+import warnings
+from pathlib import Path
+import argparse
+import sys
+import os
+from BoutPlot_cluster import bout_plot
+import time
+from PlotPDF import to_pdf
+import datetime
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+if __name__ == "__main__":
+    
+    default_vars = ["Ni","Ti","Te","N0","Ti0","Te0","Vexbx", "Vexby", "Vexbz", "Vbtildx", "Vbtildy", "Vbtildz", "Ve0_diax", "Ve0_diay", "Ve0_diaz"]
+    
+    ### Define the time index and percent of matrix to be masked ###
+    parser = argparse.ArgumentParser(prog="plot_matrix_masks",description='Plotting inputs for matrix masks')
+    parser.add_argument("-t", "--t_ind", nargs=1, default=-1, help="The time index to be plotted for %(prog)s\n(default: %(default)s)")
+    parser.add_argument("-s", "--scale", nargs=1, default="linear", help="The max and min precentage of the matrix to be masked for %(prog)s.\n(default: %(default)s)")
+    parser.add_argument("-o", "--output_type", nargs=1, default="PDF", help="Output the plots as either one large 'PDF' or as seperate 'PNG' figures stored in $SCRATCH/plots")
+    parser.add_argument("-d", "--display", nargs=1, default=False, help="Pass true if you wish to directly display the plot and false if note. Accepts 'True' and 'False' only")
+    
+    
+    ### Verify data file names and locations ###
+    parser.add_argument("-p", "--path", type=Path, default=Path("."), help="The path to the data directory (NOT THE NUMPY DIRECTORY).\n(default: \"%(default)s\"")
+    parser.add_argument("-g","--grid", type=Path, default=Path("d3d_184016.3200_psi092108_nx260ny64_updated.nc"), help="The grid file name, assumes the grid is in the data directory.\n(default: \"%(default)s\"")   
+    parser.add_argument("-v","--vars", nargs="*", default=default_vars, help="Variables from BOUT++ to be saved.\n(default: %(default)s")
+    parser.print_help()
+    args = parser.parse_args()
+    
+    # If running as a script on the cluster
+    data_dir = args.path
+    # Extract the bout grid name from the input file, expanding $BGRIDS alias is present
+    with open("BOUT.inp") as f:
+        for line in f:
+            if "grid =" in line:
+                start = line.find('"') + 1
+                end = line.rfind('"')
+                path_with_BGRIDS = line[start:end]  # Extract string inside quotes
+                grid_fname = Path(os.path.expandvars(path_with_BGRIDS))
+                break  # Stop after first match
+
+
+    print(f"Using data_dir: {data_dir}")
+    print(f"Using grid: {grid_fname}")
+
+    numpy_dir = data_dir / "numpy"
+    if not os.path.isdir(numpy_dir):
+        print(f"'{numpy_dir}' does not exist. Please run BoutSaveData to create '{numpy_dir}' first.")
+        raise ValueError(f"Did not find numpy folder in {data_dir}!")
+    
+    vars_to_be_plotted=[] # used to eliminate vars that were not found in the save file dirs
+    for var in args.vars:
+        data_file = numpy_dir / (var + ".npy")
+        if not os.path.isfile(data_file) :
+            print(f"Did not find {var} in {numpy_dir}!!")
+            warnings.warn(f"Did not find {var} in {numpy_dir} required to make plots!! Run 'bout_save_data'")
+        else:
+            vars_to_be_plotted.append(var)
+            
+    if len(vars_to_be_plotted) == 0:
+        raise ValueError(f"No requested variables found in the {numpy_dir} folder! Exiting...")
+            
+    ### Collect relevant data to make plots ###
+    
+    # Collect grid quantities
+    d = BoutData(path=data_dir)
+    t = d["outputs"]["t"].shape[0]
+    nx = d["outputs"]["nx"]
+    ny = d["outputs"]["ny"]
+    nz = d["outputs"]["nz"]
+    
+    with DataFile(str(grid_fname)) as g:
+        Rxy = g["Rxy"]
+        Zxy = g["Zxy"]
+        Bpxy = g["Bpxy"]
+        Btxy = g["Btxy"]
+        
+    figs = []
+    
+    timestamp = datetime.datetime.now().strftime("%m-%d-%Y_%H-%M")
+    current_folder = os.path.basename(os.getcwd())
+    for var in vars_to_be_plotted:
+        var_mat = np.load(numpy_dir / (var+".npy"))
+        if len(var_mat.shape) == 4:
+            var_mat = np.sum(var_mat[args.t_ind,:,:,:],axis=2)/var_mat.shape[2]
+        elif len(var_mat.shape) == 3:
+            var_mat = var_mat[args.t_ind,:,:]
+        elif len(var_mat.shape) == 2:
+            var_mat = var_mat
+        else:
+            raise ValueError(f"Var improperly shaped. Dim(var) = {len(var_mat.shape)}!")
+           
+        print(f"Starting to plot {var} \tat {current_folder}_2d_{timestamp}")
+        fig = bout_plot(grid_fname,
+                        var_mat,
+                        title=var,
+                        scale=args.scale,
+                        show_plot=bool(args.display),
+                        output_type=args.output_type)
+        figs.append(fig)
+    
+    plot_name = f'{current_folder}_MM_{timestamp}.pdf'
+    to_pdf(figs,f'{plot_name}')
+            
+            

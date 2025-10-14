@@ -1,0 +1,9 @@
+#!/bin/bash
+
+bout_save_data
+bout_save_data
+bout_save_data
+#bout_save_data
+
+bout_matrix_masks
+bout_2d_profiles

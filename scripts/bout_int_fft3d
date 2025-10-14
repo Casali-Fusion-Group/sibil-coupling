@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Aug 25 19:34:14 2025
+
+@author: irvinam
+"""
+
+from boutdata.collect import collect
+from boutdata.data import BoutData
+from boututils.datafile import DataFile
+import warnings
+import os
+import sys
+from pathlib import Path
+import matplotlib.patches as patches
+
+import numpy as np
+import matplotlib.pyplot as plt
+import numpy.ma as ma
+from BoutPlot_interactive import InteractiveFFTPlot
+import matplotlib.colors as mcolors
+import argparse
+import time
+from PlotPDF import to_pdf
+from PlotPNG import to_png
+import datetime
+
+def find_file(target):
+    return next(Path('.').rglob(target), None)
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+if __name__ == "__main__":
+    
+    default_vars = ["N0","Ti0","Te0"]#,"Vexbx", "Vexby", "Vexbz", "Vbtildx", "Vbtildy", "Vbtildz","phi","Psi"]#, "Ve0_diax", "Ve0_diay", "Ve0_diaz"]
+    
+    ### Verify data file names and locations ###
+    parser = argparse.ArgumentParser(prog="plot_matrix_masks",description='Plotting inputs for matrix masks')
+    parser.add_argument("-p", "--path", type=Path, default=Path("."), help="The path to the data directory (NOT THE NUMPY DIRECTORY).\n(default: \"%(default)s\"")
+    parser.add_argument("-g","--grid", type=Path, default=Path("d3d_184016.3200_psi092108_nx260ny64.nc"), help="The grid file name, assumes the grid is in the data directory.\n(default: \"%(default)s\"")   
+    parser.print_help()
+    args = parser.parse_args()
+    
+    # If running as a script on the cluster
+    data_dir = args.path
+    # Extract the bout grid name from the input file, expanding $BGRIDS alias is present
+    with open("BOUT.inp") as f:
+        for line in f:
+            if "grid =" in line:
+                start = line.find('"') + 1
+                end = line.rfind('"')
+                path_with_BGRIDS = line[start:end]  # Extract string inside quotes
+                grid_fname = Path(os.path.expandvars(path_with_BGRIDS))
+                break  # Stop after first match
+
+
+    print(f"Using data_dir: {data_dir}")
+    print(f"Using grid: {grid_fname}")
+
+    numpy_dir = data_dir / "numpy"
+    if not os.path.isdir(numpy_dir):
+        print(f"'{numpy_dir}' does not exist. Please run BoutSaveData to create '{numpy_dir}' first.")
+        raise ValueError(f"Did not find numpy folder in {data_dir}!")
+            
+    ### Collect relevant data to make plots ###
+    
+    # Collect grid quantities
+
+    plot_2d = InteractiveFFTPlot(data_dir,path_with_BGRIDS,numpy_dir) # plot vars should be tuple or list of tuples !!!
+        

@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# Check if user provided a directory name
+if [ -z "$1" ]; then
+    echo "Usage: call_script <directory>"
+    exit 1
+fi
+
+DIR="$1"
+SCRIPT_NAME="job_submit.sh"
+BOUT_INP="BOUT.inp"
+BOUT_INP_ORIG="BOUT.inp_orig"
+
+# Check if the directory exists
+if [ ! -d "$DIR" ]; then
+    echo "Error: Directory '$DIR' does not exist."
+    exit 1
+fi
+
+# Check if the script exists inside the directory
+if [ ! -f "$DIR/$SCRIPT_NAME" ]; then
+    echo "Error: '$SCRIPT_NAME' not found in '$DIR'."
+    exit 1
+fi
+
+# Store the original directory
+ORIG_DIR="$PWD"
+
+# Change to the target directory, submit the job, and return
+cd "$DIR"
+
+# Replace the $BGRID variable in the input file with the value of the environmental variable $BGRID
+mv "BOUT.inp" "$BOUT_INP_ORIG"
+sed "s|\$BGRIDS|${BGRIDS}|g" "$BOUT_INP_ORIG" > "$BOUT_INP"
+sbatch "$SCRIPT_NAME"
+cd "$ORIG_DIR"
+
+echo "Submitted job $DIR"

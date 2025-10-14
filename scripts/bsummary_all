@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# Set the base directory (default: current directory)
+BASE_DIR="${1:-.}"
+
+# Loop through all directories starting with 'r' followed by a number
+for dir in "$BASE_DIR"/r[0-9]*; do
+    # Check if it's a directory
+    if [ -d "$dir" ]; then
+        echo "Running: summary $dir"
+        summary "$dir"
+    fi
+done
+
+nano SummaryOfRuns
