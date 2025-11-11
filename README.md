@@ -11,7 +11,8 @@ The package includes reader files for EQDSKs, b2fstate, b2fplasmf, and b2fgmtry.
 Install with pip from the current directory:
 
 ```bash
-pip install -e .```
+pip install -e .
+```
 
 ---
 
@@ -19,9 +20,11 @@ pip install -e .```
 
 We highly encourage new users to add to the user functionality included in this package. However, we would greatly appreciate if any and all comments to follow PEP 8 python standards such that any scripts be named according to the following rules.
 
-b_function_name.py
+```bash
+b_script_name.py
 
 [bout]_[short_description_of_script_function].[python_script]
+```
 
 For scripts that require user input, please use python parser and include -h flag to print help on what the parser function serves.
 
