@@ -4,6 +4,11 @@ SIBIL is a package that couples SOLPS-ITER and the BOUT++ elm-6f model. The pack
 
 The package includes reader files for EQDSKs, b2fstate, b2fplasmf, and b2fgmtry.
 
+
+
+This code was developed under Prof. Casali's U.S. Department of Energy, Office of Science and Office of Advanced Scientific Computing Research through the Advanced Computing (SciDAC) program under Award Number R011382908
+
+
 ---
 
 ## Installation
