@@ -1,0 +1,6 @@
+numpy
+netCDF4
+matplotlib
+scipy
+boututils
+scikit-image
