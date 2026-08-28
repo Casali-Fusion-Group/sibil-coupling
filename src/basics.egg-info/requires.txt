@@ -1,5 +1,0 @@
-numpy
-netCDF4
-matplotlib
-scipy
-boututils
