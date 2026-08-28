@@ -16,6 +16,7 @@
 
 ## Ideas
 
+-[]
 -[] Create an equivalent SOLPS comparison to use bout.dl2d to view physical BOUT++ coordinates after mapping
 -[X] Create summary poloidal plotting scripts for solps
 -[X] Create summary poloidal plotting scripts for BOUT++

@@ -3,7 +3,7 @@ requires = ["setuptools >= 77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "basics_package"
+name = "sibil"
 version = "0.0.1"
 authors = [{ name = "B. Tate Taczak", email = "btaczak@vols.utk.edu" }]
 description = "A package to couple SOLPS-ITER and BOUT++"
@@ -17,7 +17,8 @@ dependencies = [
     "netCDF4",
     "matplotlib",
     "scipy",
-    "boututils"
+    "boututils",
+    "scikit-image"
 ]
 
 [project.urls]

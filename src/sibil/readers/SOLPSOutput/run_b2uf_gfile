@@ -1,0 +1,47 @@
+#!/bin/bash
+
+#-----------------------------------------------------------------------
+# bash script for running SOLPS-ITER thru SLURM
+# E. Meier
+# orig: July 2017
+#-----------------------------------------------------------------------
+
+scrdir=/fusion/projects/solps-results/smiskeyj/runs/scripts
+
+#-----------------------------------------------------------------------
+# aliases
+#-----------------------------------------------------------------------
+shopt -s expand_aliases
+alias setb2e='mv b2fstate b2fstati; rm -f b2mn.prt run.log fort.4* fort.1* fort.31; touch b2fstati'
+
+#-----------------------------------------------------------------------
+# set runname
+#-----------------------------------------------------------------------
+if [ $1 ]; then
+  run=$1
+  echo "runname is "$run
+else
+  echo "provide runname as argument!"
+  exit 0
+fi
+
+runbase=${PWD#"${PWD%/*}/"}
+
+#-----------------------------------------------------------------------
+# create custom go script.
+#-----------------------------------------------------------------------
+# cp go go_$run
+cp $scrdir/go_b2uf go_b2uf_gfile_$run
+sed -i s/THERUNBASE/$runbase/g go_b2uf_gfile_$run
+sed -i s/THERUN/$run/g go_b2uf_gfile_$run
+
+#-----------------------------------------------------------------------
+# do it.
+#-----------------------------------------------------------------------
+cd $run
+setb2e
+touch b2.*.parameters*
+touch *.dat sed.scr
+cd ..
+sbatch go_b2uf_$run
+mv go_b2uf_$run logs/.
