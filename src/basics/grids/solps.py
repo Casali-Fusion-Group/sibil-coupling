@@ -255,7 +255,7 @@ class Solps(Static_grid):
         g = GQDSK(self.config["gfile_loc"])
         interp_func = si.RegularGridInterpolator((g.R_grid, g.Z_grid), g.psi, method='cubic')
         points = np.column_stack((self.rxy.flatten(), self.zxy.flatten()))
-        self.psixy = np.reshape(interp_func(points), shape=self.rxy.shape)
+        self.psixy = np.reshape(interp_func(points), self.rxy.shape)
         self.psinxy = (g.psiaxis - self.psixy) / (g.psiaxis - g.psiedge)
             
     def _load_plasma_profiles(self):
