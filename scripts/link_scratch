@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Get the current working directory
+current_dir=$(pwd)
+
+# Extract the name of the current directory
+dir_name=$(basename "$current_dir")
+
+# Define the fixed location where the directory will be created
+fixed_location="$SCRATCH/solps-iter"
+
+# Create the directory with the same name as the current directory in the fixed location
+mkdir -p "$fixed_location/$dir_name"
+
+# Create symbolic links between the baserun and template directories
+ln -s "$current_dir/baserun" "$fixed_location/$dir_name/baserun"
+#ln -s "$current_dir/templates" "$fixed_location/$dir_name/templates"
+
+echo "Directory '$dir_name' created in '$fixed_location'."
+echo "Symbolic links created for baserun and template directories."

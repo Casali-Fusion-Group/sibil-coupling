@@ -31,8 +31,7 @@ class Static_grid(Grid):
     def _make_fresh_polycollection(self):
         verts = self.grid_polygons.get_paths()
         return PolyCollection([p.vertices for p in verts], cmap='viridis', edgecolors='black',facecolors='white',alpha=0.1)
-
-    
+        
     def plot_divertor(self, R_range=(1.0,1.7), Z_range=(-1.5,-1.0), ax=None, dpi=1200):
         if ax is None:
             fig, ax = plt.subplots()

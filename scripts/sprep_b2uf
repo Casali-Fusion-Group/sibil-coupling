@@ -1,0 +1,7 @@
+#!/bin/bash
+
+correct_b2yt_timestamps
+touch b2fparam b2fstate b2fplasma
+for f in b2mn.prt b2fparam b2fstate b2fmovie b2ftrace b2ftrack b2fplasma; do
+    [ -s $f ] && touch $f && stat $f
+done

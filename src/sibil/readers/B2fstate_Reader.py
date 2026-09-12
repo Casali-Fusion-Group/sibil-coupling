@@ -105,7 +105,7 @@ class B2fstate:
             with open(data, 'r') as file:
                 data = file.read()
         except FileNotFoundError:
-            print(f"File '{self.filename}' not found.")
+            print(f"File '{data}' not found.")
             return None
         
         entries = data.split('*cf:')

@@ -37,7 +37,8 @@ class Solps(Static_grid):
     def _initialize_profiles(self):
         self._load_geo_file()
         self._load_dl()
-        self._load_plasma_profiles()
+        fnames = (self.config["files"]["b2fstate"],self.config["files"]["b2fplasmf"],self.config["files"]["b2fgmtry"])
+        self._load_plasma_profiles(fnames)
         self._load_psixy()
         self._calculate_poloidal_angle_from_midplane()
         self._define_profile_region_indices()
@@ -411,11 +412,11 @@ class Solps(Static_grid):
         g = GQDSK(self.config["files"]["gfile"])
         interp_func = si.RegularGridInterpolator((g.R_grid, g.Z_grid), g.psi, method='cubic')
         points = np.column_stack((self.rxy.flatten(), self.zxy.flatten()))
-        self.psixy = np.reshape(interp_func(points), shape=self.rxy.shape)
+        self.psixy = np.reshape(interp_func(points), self.rxy.shape)
         self.psinxy = (g.psiaxis - self.psixy) / (g.psiaxis - g.psiedge)
             
-    def _load_plasma_profiles(self):
-        fname_b2fstate, fname_b2fplasma, fname_b2fgmtry = self.config["files"]["b2fstate"],self.config["files"]["b2fplasmf"],self.config["files"]["b2fgmtry"]
+    def _load_plasma_profiles(self, fnames):
+        fname_b2fstate, fname_b2fplasma, fname_b2fgmtry = fnames
         b2fstate = B2fstate(fname_b2fstate)
         geometry = B2fgmtry(fname_b2fgmtry)
         b2fplasmf = B2fplasmf(fname_b2fplasma, b2fstate.nx, b2fstate.ny, b2fstate.ns)

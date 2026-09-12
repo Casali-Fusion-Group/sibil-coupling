@@ -46,6 +46,7 @@ class Bout(Static_grid):
 
         '''
         Static_grid.__init__(self, grid_name, config)
+        self.bgrid_path = config["files"]["bgrid"]
         self.dl = None
         self.psi_bndry = None
         self._load_bout_profile(config["files"]["bgrid"])
@@ -462,6 +463,17 @@ class Bout(Static_grid):
     #         bvar_[:,i] = y_new
             
     #     return bvar_
+
+    def get_grid_profiles(self):
+        return_dict = {}
+        profile_keys = ["Niexp", "Neexp", "Tiexp", "Teexp"]
+        with DataFile(self.bgrid_path, write=False) as grid:
+            for key in profile_keys:
+                if key in grid.keys(): 
+                    return_dict[f"{key}"] = grid[f"{key}"]
+                else:
+                    print("WARNING: Could not find bout ion density profile")
+        return return_dict
     
     def update_gridfile(self,density_units=1e20):
         ev_to_J = 1.60218e-19
