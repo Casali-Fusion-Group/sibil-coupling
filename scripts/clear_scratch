@@ -1,0 +1,424 @@
+#!/bin/bash
+#
+# clear_scratch.sh
+#
+# Clears out one or more per-iteration scratch directories under
+#
+#     $SCRATCH/solps-iter/<CAMPAIGN>/<N>_iteration
+#
+# so that the matching local iteration folder can be moved into scratch under
+# the same name (or simply so that stale scratch content is reclaimed).
+#
+# Run this from the CAMPAIGN directory (the one that holds your *_iteration
+# folders).  The campaign name is taken from the current directory unless
+# -c/--campaign is given.
+#
+# For each iteration handled:
+#   * Symbolic links anywhere in the scratch iteration tree (e.g. the 'baserun'
+#     / 'templates' links) are unlinked FIRST -- never followed, never copied,
+#     never deleted through.
+#   * Real files/dirs that exist ONLY in scratch are moved back into the local
+#     iteration folder (created if necessary).
+#   * Real files/dirs that exist in BOTH places are deleted from scratch
+#     (the local copy is authoritative).
+#   * The now-empty scratch iteration directory is removed.
+#
+# Usage:
+#   ./clear_scratch.sh [options] [ITERATION ...]
+#
+#   ITERATION       Iteration to clear.  Accepts a bare number ("3"), a full
+#                   name ("3_iteration"), or a glob ("1?_iteration").
+#                   With no ITERATION and no -a, you are shown what exists
+#                   and asked to pick.
+#
+#   -a, --all       Clear every *_iteration directory found in scratch.
+#   -c, --campaign NAME
+#                   Override the campaign name (default: basename of $PWD).
+#   -p, --pattern GLOB
+#                   Iteration glob used by --all (default: *_iteration).
+#   -l, --list      List scratch iteration directories with sizes; exit.
+#   -n, --dry-run   Show what would happen, change nothing.
+#   -f, --force     Don't prompt before deleting duplicates from scratch.
+#   -k, --keep-dir  Empty each iteration dir but leave the dir itself in place.
+#   -h, --help      This message.
+#
+# Examples:
+#   ./clear_scratch.sh -l                 # what's out there?
+#   ./clear_scratch.sh -n 7               # dry-run iteration 7
+#   ./clear_scratch.sh 7                  # clear 7_iteration
+#   ./clear_scratch.sh 3 4 5              # clear several
+#   ./clear_scratch.sh -a -f              # clear the whole campaign, no prompts
+#   ./clear_scratch.sh -f 7 && mv 7_iteration "$SCRATCH/solps-iter/$(basename "$PWD")/"
+#
+
+set -uo pipefail
+
+DRY_RUN=0
+FORCE=0
+KEEP_DIR=0
+ALL=0
+LIST=0
+CAMPAIGN=""
+PATTERN="*_iteration"
+declare -a REQUESTED=()
+
+usage() {
+    sed -n '3,58p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -a|--all)      ALL=1 ;;
+        -c|--campaign) shift; CAMPAIGN="${1:-}" ;;
+        -p|--pattern)  shift; PATTERN="${1:-}" ;;
+        -l|--list)     LIST=1 ;;
+        -n|--dry-run)  DRY_RUN=1 ;;
+        -f|--force)    FORCE=1 ;;
+        -k|--keep-dir) KEEP_DIR=1 ;;
+        -h|--help)     usage 0 ;;
+        -*)            echo "Unknown option: $1" >&2; usage 1 ;;
+        *)             REQUESTED+=("$1") ;;
+    esac
+    shift
+done
+
+run() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "  [dry-run] $*"
+    else
+        "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Locate the campaign and its scratch counterpart
+# ---------------------------------------------------------------------------
+campaign_dir=$(pwd -P)
+[ -n "$CAMPAIGN" ] || CAMPAIGN=$(basename "$campaign_dir")
+
+if [ -z "${SCRATCH:-}" ]; then
+    echo "ERROR: \$SCRATCH is not set. Nothing to do." >&2
+    exit 1
+fi
+
+fixed_location="$SCRATCH/solps-iter"
+scratch_campaign="$fixed_location/$CAMPAIGN"
+
+# Guard against running this from inside scratch itself.
+scratch_root_real=$(cd "$fixed_location" 2>/dev/null && pwd -P)
+if [ -n "$scratch_root_real" ]; then
+    case "$campaign_dir/" in
+        "$scratch_root_real"/*)
+            echo "ERROR: you appear to be running this from inside $fixed_location." >&2
+            echo "       cd to your local campaign directory first." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+echo "Campaign          : $CAMPAIGN"
+echo "Local campaign    : $campaign_dir"
+echo "Scratch campaign  : $scratch_campaign"
+[ "$DRY_RUN" -eq 1 ] && echo "Mode              : DRY RUN (no changes)"
+echo
+
+if [ ! -d "$scratch_campaign" ]; then
+    echo "No scratch campaign directory found -- nothing to clear."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Discover the iteration directories that exist in scratch
+# ---------------------------------------------------------------------------
+shopt -s nullglob
+available=()
+for d in "$scratch_campaign"/$PATTERN; do
+    [ -d "$d" ] && [ ! -L "$d" ] && available+=("$(basename "$d")")
+done
+shopt -u nullglob
+
+# Sort numerically on the leading integer when there is one.
+if [ ${#available[@]} -gt 1 ]; then
+    mapfile -t available < <(printf '%s\n' "${available[@]}" | sort -V)
+fi
+
+if [ ${#available[@]} -eq 0 ]; then
+    echo "No iteration directories matching '$PATTERN' in $scratch_campaign."
+    shopt -s nullglob dotglob
+    stray=("$scratch_campaign"/*)
+    shopt -u nullglob dotglob
+    [ ${#stray[@]} -gt 0 ] && {
+        echo "It does contain ${#stray[@]} other item(s):"
+        for p in "${stray[@]}"; do echo "    $(basename "$p")"; done
+    }
+    exit 0
+fi
+
+if [ "$LIST" -eq 1 ]; then
+    echo "Iteration directories in scratch:"
+    for name in "${available[@]}"; do
+        sz=$(du -sh --apparent-size "$scratch_campaign/$name" 2>/dev/null | cut -f1)
+        nlink=$(find "$scratch_campaign/$name" -type l 2>/dev/null | wc -l)
+        loc="no local copy"
+        [ -d "$campaign_dir/$name" ] && loc="local copy present"
+        printf "  %-20s %6s  %2s symlink(s)  (%s)\n" "$name" "${sz:-?}" "$nlink" "$loc"
+    done
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Work out which iterations to act on
+# ---------------------------------------------------------------------------
+targets=()
+
+resolve() {
+    # Map a user token onto real iteration directory name(s).
+    local token="$1" hit=0 name
+    for name in "${available[@]}"; do
+        # exact name, bare number, or glob
+        if [ "$name" = "$token" ] \
+           || [ "$name" = "${token}_iteration" ] \
+           || [[ "$name" == $token ]]; then
+            targets+=("$name"); hit=1
+        fi
+    done
+    [ "$hit" -eq 1 ] || echo "WARNING: no scratch iteration matches '$token' -- skipped." >&2
+}
+
+if [ "$ALL" -eq 1 ]; then
+    targets=("${available[@]}")
+elif [ ${#REQUESTED[@]} -gt 0 ]; then
+    for tok in "${REQUESTED[@]}"; do resolve "$tok"; done
+else
+    echo "Iterations present in scratch:"
+    for i in "${!available[@]}"; do
+        printf "  [%d] %s\n" "$((i + 1))" "${available[$i]}"
+    done
+    echo
+    printf "Which to clear? (numbers/names, 'all', or empty to abort): "
+    read -r reply
+    case "$reply" in
+        "")        echo "Aborted."; exit 0 ;;
+        all|ALL|a) targets=("${available[@]}") ;;
+        *)
+            for tok in $reply; do
+                if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] \
+                   && [ "$tok" -le ${#available[@]} ]; then
+                    targets+=("${available[$((tok - 1))]}")
+                else
+                    resolve "$tok"
+                fi
+            done
+            ;;
+    esac
+fi
+
+# De-duplicate while preserving order.
+if [ ${#targets[@]} -gt 0 ]; then
+    mapfile -t targets < <(printf '%s\n' "${targets[@]}" | awk '!seen[$0]++')
+fi
+
+if [ ${#targets[@]} -eq 0 ]; then
+    echo "Nothing selected. Exiting."
+    exit 0
+fi
+
+echo
+echo "Will clear ${#targets[@]} iteration(s): ${targets[*]}"
+echo
+
+# ---------------------------------------------------------------------------
+# Per-iteration worker
+# ---------------------------------------------------------------------------
+tot_links=0; tot_moved=0; tot_dupes=0; tot_failed=0; tot_done=0
+
+clear_iteration() {
+    local name="$1"
+    local sdir="$scratch_campaign/$name"
+    local ldir="$campaign_dir/$name"
+    local n_links=0 n_moved=0 n_dupes=0 n_failed=0
+    local -a dupes=()
+
+    echo "=============================================================="
+    echo "ITERATION: $name"
+    echo "  scratch: $sdir"
+    echo "  local  : $ldir"
+    echo "--------------------------------------------------------------"
+
+    if [ ! -d "$sdir" ]; then
+        echo "  Not present in scratch -- already clear."
+        return 0
+    fi
+
+    # -- Pass 1: unlink every symlink in the tree, deepest first ------------
+    local link
+    while IFS= read -r -d '' link; do
+        echo "  LINK   ${link#$sdir/} -> $(readlink "$link")"
+        if run unlink "$link"; then
+            n_links=$((n_links + 1))
+        else
+            echo "         FAILED to unlink" >&2
+            n_failed=$((n_failed + 1))
+        fi
+    done < <(find "$sdir" -depth -type l -print0 2>/dev/null)
+
+    # -- Fast path: nothing local, so relocate the whole directory ----------
+    if [ ! -e "$ldir" ] && [ "$KEEP_DIR" -eq 0 ]; then
+        shopt -s nullglob dotglob
+        local remaining=("$sdir"/*)
+        shopt -u nullglob dotglob
+        if [ ${#remaining[@]} -gt 0 ]; then
+            echo "  MOVE   entire directory -> $campaign_dir/ (no local copy)"
+            if run mv -- "$sdir" "$campaign_dir/"; then
+                n_moved=$((n_moved + ${#remaining[@]}))
+                echo "  Cleared '$name'."
+                tot_links=$((tot_links + n_links)); tot_moved=$((tot_moved + n_moved))
+                tot_done=$((tot_done + 1))
+                return 0
+            fi
+            echo "         FAILED whole-directory move; falling back to per-entry." >&2
+            n_failed=$((n_failed + 1))
+        fi
+    fi
+
+    # -- Pass 2: per-entry move-back or duplicate flagging ------------------
+    shopt -s nullglob dotglob
+    local entries=("$sdir"/*)
+    shopt -u nullglob dotglob
+
+    if [ ${#entries[@]} -eq 0 ] && [ "$n_links" -eq 0 ]; then
+        echo "  Scratch iteration directory is empty."
+    fi
+
+    local path base local_copy
+    for path in "${entries[@]}"; do
+        [ -L "$path" ] && continue          # dry-run leftover
+        [ -e "$path" ] || continue
+        base=$(basename "$path")
+        local_copy="$ldir/$base"
+
+        if [ -e "$local_copy" ] || [ -L "$local_copy" ]; then
+            echo "  BOTH   $base  (local copy kept, scratch copy to be removed)"
+            dupes+=("$path")
+            n_dupes=$((n_dupes + 1))
+        else
+            if [ ! -d "$ldir" ]; then
+                echo "  MKDIR  $ldir"
+                run mkdir -p "$ldir" || { n_failed=$((n_failed + 1)); continue; }
+            fi
+            echo "  MOVE   $base  ->  $ldir/"
+            if run mv -- "$path" "$ldir/"; then
+                n_moved=$((n_moved + 1))
+            else
+                echo "         FAILED to move" >&2
+                n_failed=$((n_failed + 1))
+            fi
+        fi
+    done
+
+    # -- Pass 3: delete duplicates -----------------------------------------
+    if [ "$n_dupes" -gt 0 ]; then
+        echo
+        echo "  $n_dupes item(s) exist in both locations; these scratch copies"
+        echo "  would be DELETED:"
+        for p in "${dupes[@]}"; do echo "      ${p#$scratch_campaign/}"; done
+
+        local proceed=1 reply
+        if [ "$FORCE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+            printf "  Delete these from scratch? [y/N] "
+            read -r reply
+            case "$reply" in
+                [yY]|[yY][eE][sS]) proceed=1 ;;
+                *) proceed=0; echo "  Skipped deletion." ;;
+            esac
+        fi
+
+        if [ "$proceed" -eq 1 ]; then
+            for p in "${dupes[@]}"; do
+                run rm -rf -- "$p" || { echo "  FAILED to remove $p" >&2
+                                        n_failed=$((n_failed + 1)); }
+            done
+        fi
+    fi
+
+    # -- Remove the emptied iteration directory ----------------------------
+    echo
+    if [ "$KEEP_DIR" -eq 1 ]; then
+        echo "  --keep-dir: leaving '$sdir' in place."
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        echo "  [dry-run] rmdir $sdir"
+    elif [ ! -d "$sdir" ]; then
+        echo "  '$sdir' is gone."
+    else
+        shopt -s nullglob dotglob
+        local leftover=("$sdir"/*)
+        shopt -u nullglob dotglob
+        if [ ${#leftover[@]} -eq 0 ]; then
+            rmdir "$sdir" && echo "  Removed empty '$sdir'."
+        else
+            echo "  WARNING: '$sdir' still holds ${#leftover[@]} item(s); NOT removed:"
+            for p in "${leftover[@]}"; do echo "      $(basename "$p")"; done
+            n_failed=$((n_failed + 1))
+        fi
+    fi
+
+    printf "  [%s] links:%d moved:%d dupes:%d errors:%d\n" \
+           "$name" "$n_links" "$n_moved" "$n_dupes" "$n_failed"
+
+    tot_links=$((tot_links + n_links))
+    tot_moved=$((tot_moved + n_moved))
+    tot_dupes=$((tot_dupes + n_dupes))
+    tot_failed=$((tot_failed + n_failed))
+    [ "$n_failed" -eq 0 ] && tot_done=$((tot_done + 1))
+}
+
+for name in "${targets[@]}"; do
+    clear_iteration "$name"
+    echo
+done
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo "=============================================================="
+echo "Summary for campaign '$CAMPAIGN':"
+echo "  iterations processed     : ${#targets[@]}"
+echo "  iterations fully cleared : $tot_done"
+echo "  symlinks unlinked        : $tot_links"
+echo "  items moved back         : $tot_moved"
+echo "  duplicates cleared       : $tot_dupes"
+echo "  errors                   : $tot_failed"
+
+# If the campaign dir in scratch is now empty, offer to drop it too.
+if [ "$DRY_RUN" -eq 0 ] && [ "$KEEP_DIR" -eq 0 ] && [ -d "$scratch_campaign" ]; then
+    shopt -s nullglob dotglob
+    rest=("$scratch_campaign"/*)
+    shopt -u nullglob dotglob
+    if [ ${#rest[@]} -eq 0 ]; then
+        echo
+        echo "Scratch campaign directory is now empty."
+        if [ "$FORCE" -eq 1 ]; then
+            rmdir "$scratch_campaign" && echo "Removed '$scratch_campaign'."
+        else
+            printf "Remove '%s' too? [y/N] " "$scratch_campaign"
+            read -r reply
+            case "$reply" in
+                [yY]|[yY][eE][sS]) rmdir "$scratch_campaign" \
+                    && echo "Removed." ;;
+                *) echo "Left in place." ;;
+            esac
+        fi
+    fi
+fi
+
+[ "$tot_failed" -gt 0 ] && exit 1
+
+if [ "$DRY_RUN" -eq 0 ]; then
+    echo
+    echo "Scratch paths are clear. You can now move iterations in, e.g.:"
+    for name in "${targets[@]}"; do
+        echo "  mv \"$campaign_dir/$name\" \"$scratch_campaign/\""
+    done
+fi
+exit 0

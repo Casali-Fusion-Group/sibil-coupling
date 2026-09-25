@@ -259,7 +259,7 @@ def main() -> None:
 
     # 3. copy the iteration tree minus the heavy BOUT run dir ---------------
     print("\n[1] duplicating iteration directory")
-    copy_iteration(cur_dir, new_dir, exclude={os.path.basename(bout_dir_rel)},
+    copy_iteration(cur_dir, new_dir, exclude={"b2plasmf", os.path.basename(bout_dir_rel)},
                    dry_run=args.dry_run)
 
     # 4. copy the interactive plotter into sibil dir if desired -------------

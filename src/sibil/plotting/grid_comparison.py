@@ -54,7 +54,9 @@ def compare_poloidal_profiles(sgrid,
             
             # print(f"{psin_sol_p25:.3f}",f"{psin_sol_p75:.3f}",f"{psin_cfs_p25:.3f}",f"{psin_cfs_p25:.3f}",f"{psin_pfr_p25:.3f}",f"{psin_pfr_p25:.3f}")
             # print(ix_sol_p25,ix_sol_p75,ix_cfs_p25,ix_cfs_p75,ix_pfr_p25,ix_pfr_p75)
-            
+            print(sgrid.dl2d.shape)
+            print(sgrid.j_cfs)
+            print(six)
             ax.plot(sgrid.dl2d[six,sgrid.j_cfs],svar[six,sgrid.j_cfs],marker='o',c='r', markersize=5,markerfacecolor='none', label=f"{sgrid.grid_name}")
             ax.plot(bgrid.dl2d[bix,bgrid.j_cfs],bvar[bix,bgrid.j_cfs],marker='o',c='b', markersize=5,markerfacecolor='none', label=f"{bgrid.grid_name}")
             ax.set_xlabel(rf"$s(m)$")
