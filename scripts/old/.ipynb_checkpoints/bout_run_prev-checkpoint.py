@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""
+submit_run.py -- submit a BOUT++ run directory, then chain `bout_save` to run
+automatically when the BOUT job finishes.
+
+What it does
+------------
+1. Validates the run directory (job_submit.sh, BOUT.inp, $BGRIDS).
+2. Expands $BGRIDS / ${BGRIDS} in BOUT.inp, keeping the un-substituted
+   template in BOUT.inp_orig.
+3. Submits job_submit.sh with `sbatch --parsable` and captures the job ID.
+4. Submits `bout_save_submit` as a *dependent* job (afterok:<jobid>), so the
+   post-processing starts only if the BOUT run exits cleanly.
+
+The dependency is injected via the SBATCH_DEPENDENCY environment variable,
+which sbatch reads as the default for --dependency.  bout_save_submit
+self-submits with a bare `sbatch`, so it picks this up with no changes needed
+to the wrapper itself.
+
+Usage
+-----
+    submit_run <dir>                        # submit run + chained bout_save
+    submit_run <dir> --no-save              # submit run only
+    submit_run <dir> --save-args "-c 1"     # extra flags for bout_save
+    submit_run <dir> --after any            # run bout_save even if BOUT fails
+    submit_run <dir> --dry-run              # show the plan, submit nothing
+    submit_run <dir> --save-only            # skip BOUT, just queue bout_save
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_NAME = "job_submit.sh"
+BOUT_INP = "BOUT.inp"
+BOUT_INP_ORIG = "BOUT.inp_orig"
+SAVE_WRAPPER = "bout_save_submit"
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+def die(msg: str) -> None:
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def print_cmd(cmd: list[str], cwd: Path | None = None) -> None:
+    """
+    Print a command about to be run, keeping the line short.
+
+    The cwd (often a long absolute path) is printed on its own line rather
+    than inlined as `(cd <path> && ...)`, which is what was wrapping the
+    output onto a second terminal line.
+    """
+    if cwd is not None:
+        print(f"  (cwd: {cwd})")
+    print(f"  $ {' '.join(shlex.quote(c) for c in cmd)}")
+
+
+def prepare_bout_inp(run_dir: Path, bgrids: str, dry_run: bool) -> None:
+    """
+    Substitute $BGRIDS into BOUT.inp, preserving the template in BOUT.inp_orig.
+
+    The original script did `mv BOUT.inp BOUT.inp_orig` unconditionally, so a
+    second run would overwrite the template with an already-substituted copy --
+    losing the $BGRIDS placeholder permanently.  Here BOUT.inp_orig is the
+    source of truth whenever it exists, making the operation idempotent.
+    """
+    inp = run_dir / BOUT_INP
+    orig = run_dir / BOUT_INP_ORIG
+
+    if orig.is_file():
+        source = orig
+        print(f"  using existing template : {orig.name}")
+    elif inp.is_file():
+        if not dry_run:
+            shutil.copy2(inp, orig)
+        print(f"  saved template          : {inp.name} -> {orig.name}")
+        source = orig
+    else:
+        die(f"'{BOUT_INP}' not found in '{run_dir}'")
+        return  # unreachable, keeps linters happy
+
+    text = source.read_text() if source.is_file() else ""
+    new_text = text.replace("${BGRIDS}", bgrids).replace("$BGRIDS", bgrids)
+
+    n = text.count("${BGRIDS}") + text.count("$BGRIDS")
+    print(f"  substituted $BGRIDS     : {n} occurrence(s) -> {bgrids}")
+    if n == 0:
+        print(f"  ! warning: no $BGRIDS placeholder found in {source.name}")
+
+    if not dry_run:
+        (run_dir / BOUT_INP).write_text(new_text)
+
+
+def sbatch_parsable(args: list[str], cwd: Path, env: dict | None = None) -> str:
+    """Run sbatch --parsable and return the job ID."""
+    cmd = ["sbatch", "--parsable", *args]
+    print_cmd(cmd, cwd=cwd)
+    proc = subprocess.run(cmd, cwd=cwd, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout + proc.stderr)
+        die(f"sbatch failed (exit {proc.returncode})")
+    # --parsable prints "jobid" or "jobid;cluster"
+    job_id = proc.stdout.strip().split(";")[0]
+    if not job_id.isdigit():
+        sys.stderr.write(proc.stdout + proc.stderr)
+        die(f"could not parse job ID from sbatch output: {proc.stdout!r}")
+    return job_id
+
+
+def submit_bout_save(run_dir: Path, save_args: list[str],
+                     dep_job: str | None, after: str,
+                     dry_run: bool) -> str | None:
+    """
+    Queue bout_save_submit, optionally dependent on `dep_job`.
+
+    bout_save_submit is a self-submitting bash wrapper: invoking it runs its
+    login-node submit phase, which then calls sbatch itself.  We therefore run
+    the wrapper directly (not via sbatch) and pass the dependency through the
+    SBATCH_DEPENDENCY environment variable, which sbatch honours as the
+    default for --dependency.
+    """
+    wrapper = shutil.which(SAVE_WRAPPER)
+    if wrapper is None:
+        print(f"  ! {SAVE_WRAPPER} not found on $PATH -- skipping post-processing.",
+              file=sys.stderr)
+        print(f"    Queue it manually with:  {SAVE_WRAPPER} {run_dir}",
+              file=sys.stderr)
+        return None
+
+    env = os.environ.copy()
+    if dep_job:
+        env["SBATCH_DEPENDENCY"] = f"{after}:{dep_job}"
+        print(f"  dependency              : {after}:{dep_job}")
+
+    # Absolute path as the positional: the wrapper consumes $1 as DATA_DIR only
+    # when it is an existing directory, and cwd here is not the run dir.
+    cmd = [wrapper, str(run_dir), *save_args]
+    print_cmd(cmd)
+    if dry_run:
+        return None
+
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    sys.stdout.write("".join(f"    | {ln}\n"
+                             for ln in proc.stdout.splitlines() if ln.strip()))
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        print(f"  ! {SAVE_WRAPPER} returned {proc.returncode}; "
+              f"the BOUT job is still queued.", file=sys.stderr)
+        return None
+    return "submitted"
+
+
+# --------------------------------------------------------------------------- #
+# main
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    p = argparse.ArgumentParser(
+        prog="submit_run",
+        description="Submit a BOUT++ run directory and chain bout_save afterwards.",
+    )
+    p.add_argument("dir", type=Path, nargs="?", default=Path("."),
+                   help="BOUT++ run directory (default: cwd)")
+    p.add_argument("--no-save", action="store_true",
+                   help="Submit the BOUT run only; do not chain bout_save.")
+    p.add_argument("--save-only", action="store_true",
+                   help="Skip the BOUT run; queue bout_save immediately.")
+    p.add_argument("--save-args", default="",
+                   help="Extra arguments forwarded to bout_save, as one quoted "
+                        "string (e.g. --save-args '-c 1 -v N0 Ni').")
+    p.add_argument("--after", default="afterok",
+                   choices=["afterok", "afterany", "any", "ok"],
+                   help="Slurm dependency type for the bout_save job.")
+    p.add_argument("-n", "--dry-run", action="store_true",
+                   help="Print the plan without submitting anything.")
+    args = p.parse_args()
+
+    after = {"ok": "afterok", "any": "afterany"}.get(args.after, args.after)
+
+    run_dir = args.dir.resolve()
+    if not run_dir.is_dir():
+        die(f"directory '{args.dir}' does not exist")
+
+    save_args = shlex.split(args.save_args)
+
+    print(f"\nrun directory : {run_dir}")
+
+    # ---- bout_save only -------------------------------------------------- #
+    if args.save_only:
+        print("mode          : bout_save only (no BOUT submission)\n")
+        submit_bout_save(run_dir, save_args, None, after, args.dry_run)
+        return
+
+    # ---- validate -------------------------------------------------------- #
+    if not (run_dir / SCRIPT_NAME).is_file():
+        die(f"'{SCRIPT_NAME}' not found in '{run_dir}'")
+
+    bgrids = os.environ.get("BGRIDS")
+    if not bgrids:
+        die("environment variable BGRIDS is not set")
+
+    # ---- prepare BOUT.inp ------------------------------------------------ #
+    print("\n[1/3] preparing BOUT.inp")
+    prepare_bout_inp(run_dir, bgrids, args.dry_run)
+
+    # ---- submit the run -------------------------------------------------- #
+    print("\n[2/3] submitting BOUT run")
+    if args.dry_run:
+        print_cmd(["sbatch", "--parsable", SCRIPT_NAME], cwd=run_dir)
+        job_id = "<jobid>"
+    else:
+        job_id = sbatch_parsable([SCRIPT_NAME], cwd=run_dir)
+    print(f"  BOUT job ID             : {job_id}")
+
+    # # ---- chain bout_save ------------------------------------------------- #
+    # if args.no_save:
+    #     print("\n[3/3] --no-save given; bout_save not queued")
+    # else:
+    #     print("\n[3/3] queueing bout_save (dependent)")
+    #     submit_bout_save(run_dir, save_args,
+    #                      None if args.dry_run else job_id,
+    #                      after, args.dry_run)
+
+    print(f"\nSubmitted job {run_dir.name}  (BOUT job {job_id})")
+    if not args.dry_run:
+        print(f"Watch with:  squeue -u $USER -j {job_id} --start")
+    print()
+
+
+if __name__ == "__main__":
+    main()

@@ -51,6 +51,19 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
+def print_cmd(cmd: list[str], cwd: Path | None = None) -> None:
+    """
+    Print a command about to be run, keeping the line short.
+
+    The cwd (often a long absolute path) is printed on its own line rather
+    than inlined as `(cd <path> && ...)`, which is what was wrapping the
+    output onto a second terminal line.
+    """
+    if cwd is not None:
+        print(f"  (cwd: {cwd})")
+    print(f"  $ {' '.join(shlex.quote(c) for c in cmd)}")
+
+
 def prepare_bout_inp(run_dir: Path, bgrids: str, dry_run: bool) -> None:
     """
     Substitute $BGRIDS into BOUT.inp, preserving the template in BOUT.inp_orig.
@@ -90,7 +103,7 @@ def prepare_bout_inp(run_dir: Path, bgrids: str, dry_run: bool) -> None:
 def sbatch_parsable(args: list[str], cwd: Path, env: dict | None = None) -> str:
     """Run sbatch --parsable and return the job ID."""
     cmd = ["sbatch", "--parsable", *args]
-    print(f"  $ (cd {cwd} && {' '.join(shlex.quote(c) for c in cmd)})")
+    print_cmd(cmd, cwd=cwd)
     proc = subprocess.run(cmd, cwd=cwd, env=env,
                           capture_output=True, text=True)
     if proc.returncode != 0:
@@ -132,7 +145,7 @@ def submit_bout_save(run_dir: Path, save_args: list[str],
     # Absolute path as the positional: the wrapper consumes $1 as DATA_DIR only
     # when it is an existing directory, and cwd here is not the run dir.
     cmd = [wrapper, str(run_dir), *save_args]
-    print(f"  $ {' '.join(shlex.quote(c) for c in cmd)}")
+    print_cmd(cmd)
     if dry_run:
         return None
 
@@ -202,20 +215,20 @@ def main() -> None:
     # ---- submit the run -------------------------------------------------- #
     print("\n[2/3] submitting BOUT run")
     if args.dry_run:
-        print(f"  $ (cd {run_dir} && sbatch --parsable {SCRIPT_NAME})")
+        print_cmd(["sbatch", "--parsable", SCRIPT_NAME], cwd=run_dir)
         job_id = "<jobid>"
     else:
         job_id = sbatch_parsable([SCRIPT_NAME], cwd=run_dir)
     print(f"  BOUT job ID             : {job_id}")
 
-    # ---- chain bout_save ------------------------------------------------- #
-    if args.no_save:
-        print("\n[3/3] --no-save given; bout_save not queued")
-    else:
-        print("\n[3/3] queueing bout_save (dependent)")
-        submit_bout_save(run_dir, save_args,
-                         None if args.dry_run else job_id,
-                         after, args.dry_run)
+    # # ---- chain bout_save ------------------------------------------------- #
+    # if args.no_save:
+    #     print("\n[3/3] --no-save given; bout_save not queued")
+    # else:
+    #     print("\n[3/3] queueing bout_save (dependent)")
+    #     submit_bout_save(run_dir, save_args,
+    #                      None if args.dry_run else job_id,
+    #                      after, args.dry_run)
 
     print(f"\nSubmitted job {run_dir.name}  (BOUT job {job_id})")
     if not args.dry_run:

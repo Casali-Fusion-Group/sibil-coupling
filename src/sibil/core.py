@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import os
 from boututils.datafile import DataFile
-from sibil_io_functions import load_config
+from .io_scripts.sibil_io_functions import load_config
 from .readers.GQDSK_Reader import GQDSK
 from .grids.bout import Bout
 from .grids.solps import Solps

@@ -26,4 +26,6 @@ from .plotting.grid_comparison import (
 from .grids.bout import Bout
 from .grids.solps import Solps
 from .grids.mapping import Mapping
+from .readers.B2fstate_Reader import B2fstate
+from .readers.GQDSK_Reader import GQDSK
 print("SIBIL Succsessfully Imported")

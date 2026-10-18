@@ -166,8 +166,6 @@ def link_item(src: Path, dst: Path, dry_run: bool) -> bool:
     """Links a file or directory; returns True if linked."""
     if not src.exists():
         msg = f"  ! missing: {src}"
-        if required:
-            sys.exit(msg + "   (required)")
         print(msg + "   (skipped)")
         return False
     print(f"  ln -s {src}  ->  {dst}")

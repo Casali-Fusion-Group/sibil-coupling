@@ -1,9 +1,11 @@
 import numpy as np
 
-def end_biased_convergence(var, N, L):
+def end_biased_convergence(var, _N, _L):
     if len(var.shape) == 4:
         var = np.sum(var, axis=3) / var.shape[3]
     (t_all,ix,jy) = var.shape
+    N = _N if _N is not None else 1
+    L = _L if _L is not None else t_all
     var_tilde = np.zeros((L,ix,jy))
     for l in range(L):
         if l == 0:
@@ -21,10 +23,12 @@ def end_biased_convergence(var, N, L):
             
     return var_tilde
 
-def unbiased_convergence(var, N, L):
+def unbiased_convergence(var, _N, _L):
     if len(var.shape) == 4:
         var = np.sum(var, axis=3) / var.shape[3]
     (t_all,ix,jy) = var.shape
+    N = _N if _N is not None else 1
+    L = _L if _L is not None else t_all
     var_tilde = np.zeros((L,ix,jy))
     for l in range(L):
         if l == 0:
