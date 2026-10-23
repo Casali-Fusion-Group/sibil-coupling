@@ -1,0 +1,52 @@
+#!/bin/bash
+# Usage: bout_clean_submit dir [--no-save]
+#   dir is either a BOUT++ run dir, or a SIBIL iteration dir containing
+#   SIBIL_config.yaml (the BOUT++ run is then dir/<files.bout_dir>).
+
+set -euo pipefail
+
+DATA_DIR="$(cd "$1" && pwd)"
+shift
+
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+yaml_get() {
+    grep -E "^[[:space:]]*$1:" "$CFG" | head -n 1 \
+        | sed -E 's/^[^:]*:[[:space:]]*"?([^"#]*)"?.*$/\1/' | sed -E 's/[[:space:]]+$//'
+}
+
+CFG="$DATA_DIR/SIBIL_config.yaml"
+if [ -f "$CFG" ]; then
+    # Job name: bclean_<tail of SIBIL run name>_i<iteration>
+    RUN_NAME="$(basename "$(yaml_get base_path)")"
+    ITER="$(yaml_get iteration)"
+    BOUT_DIR="$(yaml_get bout_dir)"
+    if [ -z "$RUN_NAME" ] || [ -z "$ITER" ] || [ -z "$BOUT_DIR" ]; then
+        echo "Error: base_path, iteration or files.bout_dir missing from $CFG" >&2
+        exit 1
+    fi
+    DATA_DIR="$(cd "$DATA_DIR/$BOUT_DIR" && pwd)"
+
+    MAX_SUFFIX_LEN=10
+    if [ "${#RUN_NAME}" -gt "$MAX_SUFFIX_LEN" ]; then
+        SUFFIX="${RUN_NAME: -${MAX_SUFFIX_LEN}}"
+        case "$SUFFIX" in
+            *_*) SUFFIX="${SUFFIX#*_}" ;;
+        esac
+    else
+        SUFFIX="$RUN_NAME"
+    fi
+    SUFFIX="$(printf '%s' "$SUFFIX" | tr -c 'A-Za-z0-9._-' '_')_i${ITER}"
+else
+    # Job name: bclean_r#.# (or r#) taken from the data dir basename
+    SUFFIX="$(basename "$DATA_DIR" | grep -oE '(^|[^A-Za-z])r[0-9]+(\.[0-9]+)?' | tail -n 1 | sed 's/^[^r]*//' || true)"
+    if [ -z "$SUFFIX" ]; then
+        echo "Error: no r# or r#.# found in '$(basename "$DATA_DIR")'" >&2
+        exit 1
+    fi
+fi
+
+sbatch --chdir="$DATA_DIR" \
+       --job-name="bclean_${SUFFIX}" \
+       --export=ALL,BOUT_CLEAN_PY="$SCRIPT_DIR/bout_clean" \
+       "$SCRIPT_DIR/clean_submit_backend.sh" "$@"

@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""
+config -- edit SIBIL_config.yaml from the command line.
+
+    config bgrid new_grid.nc          # set files.bgrid
+    config iteration 3                # set a top-level key
+    config files.gfile ../g184016     # fully-qualified, for ambiguous names
+    config solver.tolerance.rtol 1e-7 # creates both sections, then the leaf
+    config -E                         # hand-edit in $EDITOR
+    config -l                         # list every key path and value
+    config bgrid new.nc -n            # dry run
+
+Design
+------
+Keys are *discovered* by parsing the file's structure (so nesting is understood
+and typos are caught), but every write is a line-level splice.  Nothing else in
+the file moves: comments, blank lines, key order, quoting style and indentation
+are all byte-for-byte preserved.  A YAML round-trip would reflow the whole
+document and strip every comment, which is why it is not used for writing.
+
+A bare leaf name is matched anywhere in the tree, at any depth, so
+``config bgrid ...`` finds ``files: bgrid:`` without you naming the section.
+If the name is ambiguous the script refuses and prints the candidates.
+
+A key that does not exist is an *offer*, not an error: if the path says where
+it goes it is created there (building any missing sections above it); if it is
+a bare name it asks.  Use --no-add in scripts to restore the strict behaviour.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None  # only used for the post-edit validity check
+
+CONFIG_NAME = "SIBIL_config.yaml"
+ITER_RE = re.compile(r"^(\d+)_iteration$")
+
+# A "key:" line.  Rejects comments, list items ("- foo:") and blank lines.
+KEY_RE = re.compile(
+    r"""^(?P<indent>[ \t]*)
+         (?P<q1>["']?)(?P<key>[A-Za-z_][\w.\- ]*?)(?P=q1)
+         (?P<sep>[ \t]*:)
+         (?P<rest>([ \t].*)?)$""",
+    re.VERBOSE,
+)
+
+
+def die(msg: str, code: int = 1):
+    print(f"config: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --------------------------------------------------------------------------- #
+# 1. find the config file
+# --------------------------------------------------------------------------- #
+def find_config(explicit: str | None) -> Path:
+    """
+    Search order:
+      1. --file / $SIBIL_CONFIG  (accepts a directory too)
+      2. ./SIBIL_config.yaml
+      3. the highest-numbered ./<N>_iteration/SIBIL_config.yaml
+      4. walk up the parents (handles being cwd'd into the BOUT run dir)
+    """
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.is_dir():
+            p = p / CONFIG_NAME
+        if not p.is_file():
+            die(f"no such config file: {p}")
+        return p.resolve()
+
+    cwd = Path.cwd()
+
+    local = cwd / CONFIG_NAME
+    if local.is_file():
+        return local.resolve()
+
+    # sitting in a run root: pick the newest iteration
+    iters = {int(m.group(1)): d
+             for d in cwd.iterdir() if d.is_dir()
+             for m in [ITER_RE.match(d.name)] if m}
+    if iters:
+        cand = iters[max(iters)] / CONFIG_NAME
+        if cand.is_file():
+            return cand.resolve()
+
+    # sitting in <N>_iteration/<bout_dir>/ or deeper
+    for parent in cwd.parents:
+        cand = parent / CONFIG_NAME
+        if cand.is_file():
+            return cand.resolve()
+        if parent == parent.parent or parent == Path.home():
+            break
+
+    die(f"could not locate {CONFIG_NAME} in {cwd}, its parents, "
+        f"or any <N>_iteration/ subdirectory.\n"
+        f"       Pass one explicitly:  config -f path/to/{CONFIG_NAME} KEY VALUE")
+
+
+# --------------------------------------------------------------------------- #
+# 2/3. discover every key path, with its line number
+# --------------------------------------------------------------------------- #
+def split_value_comment(rest: str) -> tuple[str, str]:
+    """
+    Split the text after 'key:' into (value, comment_tail), respecting quotes.
+
+    'rest' includes its leading whitespace.  The tail returned is everything
+    from the '#' onward, so it can be re-appended verbatim.  A '#' inside a
+    quoted string, or one not preceded by whitespace (e.g. a URL fragment),
+    is not treated as a comment.
+    """
+    quote = None
+    for i, ch in enumerate(rest):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or rest[i - 1] in " \t"):
+            return rest[:i], rest[i:]
+    return rest, ""
+
+
+def scan(path: Path) -> list[dict]:
+    """
+    Build [{path: ('files','bgrid'), line: int, value: str, indent: int, ...}]
+    by tracking indentation.  Nested mappings become tuple paths of any depth.
+    The indent is recorded because inserting a new key needs to match it.
+    """
+    entries: list[dict] = []
+    stack: list[tuple[int, str]] = []  # (indent, key)
+    in_block = None                    # indent of an active |/> scalar
+
+    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" \t"))
+
+        # skip the body of a block scalar; its lines are not keys
+        if in_block is not None:
+            if not stripped or indent > in_block:
+                continue
+            in_block = None
+
+        if not stripped or stripped.startswith("#") or stripped.startswith("- "):
+            continue
+
+        m = KEY_RE.match(line)
+        if not m:
+            continue
+
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+
+        key = m.group("key")
+        keypath = tuple(k for _, k in stack) + (key,)
+        value, comment = split_value_comment(m.group("rest"))
+        v = value.strip()
+
+        if v in ("|", ">", "|-", ">-", "|+", ">+"):
+            in_block = indent
+            entries.append(dict(path=keypath, line=lineno, value=v,
+                                indent=indent, comment=comment, kind="block"))
+            continue
+
+        if v == "":
+            # a section header (or an explicit null); becomes a path prefix
+            stack.append((indent, key))
+            entries.append(dict(path=keypath, line=lineno, value="",
+                                indent=indent, comment=comment, kind="parent"))
+            continue
+
+        entries.append(dict(path=keypath, line=lineno, value=v,
+                            indent=indent, comment=comment, kind="scalar"))
+
+    return entries
+
+
+def resolve_key(entries: list[dict], query: str,
+                missing_ok: bool = False) -> dict | None:
+    """
+    Match `query` against discovered paths.  Accepts 'bgrid', 'files.bgrid',
+    'files:bgrid' or 'files/bgrid'.  Exact suffix match first, then
+    case-insensitive.  With missing_ok, a genuine miss returns None so the
+    caller can offer to create the key instead of aborting.
+    """
+    want = tuple(s for s in re.split(r"[.:/]", query) if s)
+    if not want:
+        die("empty key")
+
+    def suffix(e, w):
+        return len(e["path"]) >= len(w) and e["path"][-len(w):] == w
+
+    editable = [e for e in entries if e["kind"] != "parent"]
+
+    hits = [e for e in editable if suffix(e, want)]
+    if not hits:
+        lw = tuple(s.lower() for s in want)
+        hits = [e for e in editable
+                if len(e["path"]) >= len(lw)
+                and tuple(s.lower() for s in e["path"][-len(lw):]) == lw]
+
+    if not hits:
+        # pointing at a section is a common mistake -- say so usefully
+        parents = [e for e in entries if e["kind"] == "parent" and suffix(e, want)]
+        if parents:
+            pre = parents[0]["path"]
+            die(f"'{query}' is a section, not a value. Keys inside it:\n" +
+                "\n".join(f"       {'.'.join(e['path'])}" for e in editable
+                          if e["path"][:len(pre)] == pre))
+        if missing_ok:
+            return None
+        near = [".".join(e["path"]) for e in editable
+                if want[-1].lower() in ".".join(e["path"]).lower()]
+        msg = f"no key matching '{query}' in this config."
+        msg += ("\n       Did you mean:  " + "  ".join(near)) if near else \
+               "\n       Run 'config -l' to list available keys."
+        die(msg)
+
+    if len(hits) > 1:
+        die(f"'{query}' is ambiguous -- it matches {len(hits)} keys:\n" +
+            "\n".join(f"       {'.'.join(e['path'])} = {e['value']}" for e in hits) +
+            "\n       Qualify it, e.g.  config " +
+            ".".join(hits[0]["path"]) + " NEW_VALUE")
+
+    return hits[0]
+
+
+# --------------------------------------------------------------------------- #
+# 4. rewrite exactly one line
+# --------------------------------------------------------------------------- #
+# Values YAML already reads as a number/bool/null: never wrap these in quotes,
+# even when the surrounding keys are quoted strings.
+PLAIN_SCALAR = re.compile(
+    r"^([+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?"
+    r"|true|false|yes|no|on|off|null|~)$", re.IGNORECASE)
+NEEDS_QUOTE = re.compile(r"""[\s#:,{}\[\]&*!|>'"%@`]|^[-?]""")
+
+
+def format_value(new: str, old: str, force: str | None) -> str:
+    """
+    Render `new` using the quoting style of `old` where possible.
+
+    - old was quoted   -> keep the same quote character
+    - old was bare     -> stay bare unless YAML would misparse it
+    - --quote/--bare   -> explicit override
+    """
+    old_q = old[0] if len(old) >= 2 and old[0] in "\"'" and old[-1] == old[0] else ""
+
+    if force == "bare":
+        return new
+    if force in ('"', "'"):
+        q = force
+    elif old_q:
+        q = old_q
+    elif NEEDS_QUOTE.search(new):
+        q = '"'
+    else:
+        return new
+
+    esc = new.replace("\\", "\\\\").replace('"', '\\"') if q == '"' \
+        else new.replace("'", "''")
+    return f"{q}{esc}{q}"
+
+
+def rewrite(path: Path, entry: dict, new_value: str,
+            force_quote: str | None, dry_run: bool, backup: bool) -> None:
+    lines = path.read_text().splitlines(keepends=True)
+    idx = entry["line"] - 1
+    raw = lines[idx]
+    newline = "\r\n" if raw.endswith("\r\n") else ("\n" if raw.endswith("\n") else "")
+    body = raw[: len(raw) - len(newline)]
+
+    m = KEY_RE.match(body)
+    if not m:  # cannot happen; guards against a file edited under us
+        die(f"line {entry['line']} no longer looks like a key: {body!r}")
+
+    value_part, comment = split_value_comment(m.group("rest"))
+
+    if entry["kind"] == "block":
+        die(f"'{'.'.join(entry['path'])}' is a multi-line block scalar; "
+            f"edit it by hand (line {entry['line']}).")
+
+    old = value_part.strip()
+    rendered = format_value(new_value, old, force_quote)
+
+    # Preserve the gap between ':' and the value, and everything from '#' on.
+    lead_ws = value_part[: len(value_part) - len(value_part.lstrip())] or " "
+    trail_ws = ""
+    if comment:
+        # keep the original column of the comment if it still fits
+        old_col = len(m.group("indent")) + len(m.group("q1")) * 2 + \
+            len(m.group("key")) + len(m.group("sep")) + len(value_part)
+        new_col = len(m.group("indent")) + len(m.group("q1")) * 2 + \
+            len(m.group("key")) + len(m.group("sep")) + len(lead_ws) + len(rendered)
+        trail_ws = " " * max(1, old_col - new_col)
+        comment = comment.lstrip()
+
+    new_body = (f"{m.group('indent')}{m.group('q1')}{m.group('key')}{m.group('q1')}"
+                f"{m.group('sep')}{lead_ws}{rendered}{trail_ws}{comment}")
+
+    dotted = ".".join(entry["path"])
+    print(f"\n{path}")
+    print(f"  key   : {dotted}")
+    print(f"  line  : {entry['line']}")
+    print(f"  - {body}")
+    print(f"  + {new_body}")
+
+    if old == rendered:
+        print("\n  (no change -- value is already set)")
+        return
+    if dry_run:
+        print("\n  dry run: nothing written")
+        return
+
+    lines[idx] = new_body + newline
+    write_out(path, "".join(lines), backup)
+
+
+# --------------------------------------------------------------------------- #
+# 5. create a key, and any missing sections above it
+# --------------------------------------------------------------------------- #
+def indent_step(entries: list[dict]) -> int:
+    """
+    Infer the file's indentation step from a section and its first child,
+    rather than assuming 2.  Falls back to 2 for a flat file.
+    """
+    for i, e in enumerate(entries):
+        if e["kind"] != "parent":
+            continue
+        for child in entries[i + 1:]:
+            if len(child["path"]) == len(e["path"]) + 1 and \
+                    child["path"][:len(e["path"])] == e["path"]:
+                step = child["indent"] - e["indent"]
+                if step > 0:
+                    return step
+            if child["indent"] <= e["indent"]:
+                break
+    return 2
+
+
+def section_end(lines: list[str], parent: dict | None) -> int:
+    """
+    Index (0-based, exclusive) at which to insert a new key.
+
+    For a section this is just past its last non-blank member line, so the
+    blank-line separator and the comment block introducing the *next* section
+    stay where they are.  For the top level it is the end of the file, backed
+    up over any trailing blanks.
+    """
+    if parent is None:
+        i = len(lines)
+        while i > 0 and not lines[i - 1].strip():
+            i -= 1
+        return i
+
+    base = parent["indent"]
+    i = parent["line"]          # 0-based index of the line after the header
+    last = i
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped:
+            ind = len(lines[i]) - len(lines[i].lstrip(" \t"))
+            if ind <= base:
+                break
+            last = i + 1
+        i += 1
+    return last
+
+
+def deepest_parent(entries: list[dict],
+                   want: tuple[str, ...]) -> tuple[dict | None, int]:
+    """
+    Longest prefix of `want` that already exists as a section.
+    Returns (entry, n_components_matched); (None, 0) means the top level.
+    """
+    for n in range(len(want) - 1, 0, -1):
+        pre = want[:n]
+        for e in entries:
+            if e["kind"] == "parent" and e["path"] == pre:
+                return e, n
+        # also accept a suffix match, so a nested section can be named alone
+        for e in entries:
+            if e["kind"] == "parent" and len(e["path"]) >= n and \
+                    e["path"][-n:] == pre:
+                return e, n
+    return None, 0
+
+
+def interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def confirm(question: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        print(f"{question} yes (assumed)")
+        return True
+    if not interactive():
+        die("would need to ask whether to create this key, but the session is "
+            "not interactive.\n       Re-run with -a/--add to create it, or "
+            "--no-add to fail instead.")
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def choose_section(entries: list[dict]) -> tuple[str, ...] | None:
+    """
+    A bare name says nothing about placement, so ask.  Returns the chosen
+    section path, () for the top level, or None if the user backed out.
+    """
+    sections = [e["path"] for e in entries if e["kind"] == "parent"]
+    if not sections:
+        return ()
+    if not interactive():
+        die("a bare key name does not say where to put it.\n"
+            "       Qualify it (config files.newkey VALUE) or pass "
+            "--section SECTION.")
+
+    print("\nWhere should it go?")
+    print("   0) cancel")
+    print("   1) top level")
+    for i, s in enumerate(sections, start=2):
+        print(f"  {i:2d}) {'.'.join(s)}")
+    try:
+        raw = input("select [0]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not raw or raw == "0":
+        return None
+    if not raw.isdigit() or not 1 <= int(raw) <= len(sections) + 1:
+        die(f"not a valid selection: {raw!r}")
+    n = int(raw)
+    return () if n == 1 else sections[n - 2]
+
+
+def create_key(path: Path, entries: list[dict], want: tuple[str, ...],
+               new_value: str, force_quote: str | None,
+               dry_run: bool, backup: bool) -> None:
+    """Insert `want` = `new_value`, creating any missing sections above it."""
+    lines = path.read_text().splitlines(keepends=True)
+    newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    step = indent_step(entries)
+
+    parent, matched = deepest_parent(entries, want)
+    missing = want[matched:]                    # sections to create + the leaf
+    base = (parent["indent"] + step) if parent else 0
+    at = section_end(lines, parent)
+
+    block: list[str] = []
+    for depth, name in enumerate(missing[:-1]):
+        block.append(" " * (base + depth * step) + f"{name}:" + newline)
+
+    # A new key looks out of place if its neighbours are quoted and it is not,
+    # so borrow the quoting style of an existing sibling -- but never quote a
+    # value that is meant to be a number or a bool.
+    sibling = ""
+    if len(missing) == 1 and not PLAIN_SCALAR.match(new_value):
+        pre = parent["path"] if parent else ()
+        for e in entries:
+            if e["kind"] == "scalar" and e["path"][:-1] == pre and e["value"]:
+                sibling = e["value"]
+                break
+
+    leaf_indent = " " * (base + (len(missing) - 1) * step)
+    rendered = format_value(new_value, sibling, force_quote)
+    block.append(f"{leaf_indent}{missing[-1]}: {rendered}" + newline)
+
+    # Keep the file tidy: a new top-level section gets a blank line before it.
+    if parent is None and len(missing) > 1 and at > 0 and lines[at - 1].strip():
+        block.insert(0, newline)
+
+    where = ".".join(parent["path"]) + ":" if parent else "top level"
+    print(f"\n{path}")
+    print(f"  create : {'.'.join(want)}")
+    print(f"  under  : {where}")
+    print(f"  line   : {at + 1}")
+    for ln in block:
+        if ln.strip():
+            print(f"  + {ln.rstrip()}")
+
+    if dry_run:
+        print("\n  dry run: nothing written")
+        return
+
+    # A file whose last line lacks a newline would swallow the insertion.
+    if at == len(lines) and lines and not lines[-1].endswith(("\n", "\r")):
+        lines[-1] += newline
+
+    write_out(path, "".join(lines[:at] + block + lines[at:]), backup)
+
+
+def write_out(path: Path, text: str, backup: bool) -> None:
+    """
+    Validate, then swap atomically.  Shared by rewrite() and create_key() so
+    that neither can leave a half-written or unparseable config behind.
+    """
+    if yaml is not None:
+        try:
+            yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            die(f"the edit would make the file invalid YAML, aborting:\n{exc}")
+
+    bak = None
+    if backup:
+        bak = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, bak)
+
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+    print("\n  written" + (f" (backup: {bak.name})" if bak else ""))
+
+
+# --------------------------------------------------------------------------- #
+# 6. hand editing
+# --------------------------------------------------------------------------- #
+def open_editor(path: Path) -> None:
+    """
+    Open the config in $VISUAL/$EDITOR (default nano -c) and re-check it on
+    exit, so a typo introduced by hand surfaces here rather than at the next
+    SIBIL run.  The path is passed to the editor directly: no cd, so $OLDPWD
+    and the caller's working directory are untouched.
+    """
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano -c"
+    cmd = shlex.split(editor) + [str(path)]
+    print(f"config: {' '.join(cmd)}")
+    try:
+        rc = subprocess.call(cmd)
+    except FileNotFoundError:
+        die(f"editor not found: {cmd[0]}  (set $EDITOR or $VISUAL)")
+    if rc != 0:
+        die(f"editor exited with status {rc}", rc)
+    if yaml is not None:
+        try:
+            yaml.safe_load(path.read_text())
+        except yaml.YAMLError as exc:
+            die(f"warning: {path.name} is no longer valid YAML:\n{exc}")
+
+
+# --------------------------------------------------------------------------- #
+def list_keys(path: Path, entries: list[dict]) -> None:
+    print(f"\n{path}\n")
+    width = max((len(".".join(e["path"])) for e in entries
+                 if e["kind"] != "parent"), default=20)
+    for e in entries:
+        dotted = ".".join(e["path"])
+        if e["kind"] == "parent":
+            print(f"  {dotted}:")
+        else:
+            print(f"    {dotted:<{width}}  =  {e['value']}")
+    print()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        prog="config",
+        description="Edit SIBIL_config.yaml, preserving comments and layout.",
+        epilog="examples:\n"
+               "  config bgrid Shelf_v2/grid.nc\n"
+               "  config iteration 3\n"
+               "  config files.gfile ../g184016.03200\n"
+               "  config solver.tolerance.rtol 1e-7   # creates both sections\n"
+               "  config -E                           # hand-edit in $EDITOR\n"
+               "  config -l",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("key", nargs="?", help="key name, or dotted path (files.bgrid)")
+    p.add_argument("value", nargs="*", help="new value (joined if multi-word)")
+    p.add_argument("-f", "--file", default=os.environ.get("SIBIL_CONFIG"),
+                   help="config file or directory (default: auto-detect)")
+    p.add_argument("-l", "--list", action="store_true", help="list all keys")
+    p.add_argument("-g", "--get", action="store_true",
+                   help="print the current value and exit")
+    p.add_argument("-n", "--dry-run", action="store_true",
+                   help="show the diff without writing")
+    p.add_argument("-b", "--backup", action="store_true",
+                   help="keep a .bak copy")
+    p.add_argument("-E", "--edit", action="store_true",
+                   help="open the config in $EDITOR ($VISUAL, else nano -c)")
+    p.add_argument("--section", metavar="PATH",
+                   help="section to create a new key under (implies --add)")
+    a = p.add_mutually_exclusive_group()
+    a.add_argument("-a", "--add", action="store_true",
+                   help="create the key if it does not exist, without asking")
+    a.add_argument("--no-add", action="store_true",
+                   help="never create keys; fail on an unknown one "
+                        "(use this in scripts)")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="assume yes to every prompt")
+    q = p.add_mutually_exclusive_group()
+    q.add_argument("-q", "--quote", dest="force", action="store_const",
+                   const='"', help="force double quotes")
+    q.add_argument("--bare", dest="force", action="store_const", const="bare",
+                   help="force an unquoted value")
+    args = p.parse_args()
+
+    cfg = find_config(args.file)
+
+    if args.edit:
+        open_editor(cfg)
+        return
+
+    entries = scan(cfg)
+    if not entries:
+        die(f"no keys found in {cfg} -- is it really a YAML config?")
+
+    if args.list:
+        list_keys(cfg, entries)
+        return
+
+    if not args.key:
+        p.print_usage(sys.stderr)
+        die("a key is required (or use -l to list keys)")
+
+    may_add = (args.add or args.yes or bool(args.section)) and not args.no_add
+    entry = resolve_key(entries, args.key, missing_ok=not args.no_add)
+
+    # ---- the key does not exist yet ---------------------------------------
+    if entry is None:
+        if args.get or not args.value:
+            die(f"no key matching '{args.key}' in this config.\n"
+                f"       Run 'config -l' to list available keys.")
+
+        want = tuple(s for s in re.split(r"[.:/]", args.key) if s)
+
+        # Show near-misses before offering to create: a typo'd key and a
+        # deliberately new one look identical from here.
+        near = [".".join(e["path"]) for e in entries
+                if e["kind"] != "parent"
+                and want[-1].lower() in ".".join(e["path"]).lower()]
+        if near and not may_add:
+            print(f"config: '{args.key}' is not in this config. "
+                  f"Similar keys:  {'  '.join(near)}", file=sys.stderr)
+
+        if args.section:
+            sec = tuple(s for s in re.split(r"[.:/]", args.section) if s)
+            want = sec + want[-1:]
+        elif len(want) == 1 and not may_add:
+            # a bare name carries no placement information -- ask
+            chosen = choose_section(entries)
+            if chosen is None:
+                die("cancelled; nothing written", 0)
+            want = tuple(chosen) + want
+            may_add = True          # the menu was the confirmation
+
+        if not may_add:
+            question = f"config: create '{'.'.join(want)}' = {' '.join(args.value)}?"
+            if not confirm(question, args.yes):
+                die("cancelled; nothing written", 0)
+
+        create_key(cfg, entries, want, " ".join(args.value), args.force,
+                   args.dry_run, args.backup)
+        return
+
+    # ---- read-only -------------------------------------------------------- #
+    if args.get or not args.value:
+        if not args.get:
+            print("config: no value given; showing current setting "
+                  "(use -g to silence this)", file=sys.stderr)
+        print(f"{'.'.join(entry['path'])} = {entry['value']}")
+        return
+
+    rewrite(cfg, entry, " ".join(args.value), args.force,
+            args.dry_run, args.backup)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# Check if user provided a directory name
+if [ -d "$1" ]; then
+    echo "<directory> provided already exists! Please provide a new <directory>."
+    exit 1
+fi
+
+# Check to make sure the run directory that you are in has a baserun directory that is properly configured
+if [ ! -d "./baserun" ] || [ ! -f "./baserun/job_submit.sh" ] || [ ! -f "./baserun/BOUT.inp" ]; then
+    echo "Baserun directory is not configured properly. Please fix if you desire to use this script."
+    exit 1
+else
+    echo "Baserun directory and requisite files found! Creating new run directory."
+fi
+
+# Define the names of the desired scripts to be copied over.
+DIR="$1"
+SCRIPT_NAME="job_submit.sh"
+INPUTFILE_NAME="BOUT.inp"
+
+# Create directory and move files
+mkdir ./$DIR
+cp ./baserun/$SCRIPT_NAME ./$DIR
+cp ./baserun/$INPUTFILE_NAME ./$DIR
+mkdir ./$DIR/logs
+echo "Run directory $DIR created and files moved successfully!"

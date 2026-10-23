@@ -581,6 +581,7 @@ def check_grid_equilibrium(grid_or_path, jomp=44, eps_dx=0.05,
         ax.plot(x, dd / (_finite_max(dd) + TINY), "0.6", lw=1.0, label=r"$J_{\|0}''$")
     else:
         ax.text(0.5, 0.5, "Jpar0 not in grid file", ha="center", transform=ax.transAxes)
+        ax.yaxis.get_offset_text().set_fontsize(7)
     ax.set_ylabel("Jpar0\n(norm.)", fontsize=12)
 
     ax = axs[4]
@@ -762,7 +763,7 @@ def topology_check(grid_or_path, PF_limit_range=0.98, PF_limit=True, bpxy_constr
     for a in axs[-1]:
         a.set_xlabel("poloidal index")
     for a in axs[:, 0]:
-        a.set_ylabel(r"$\psi_n$ (midplane map)")
+        a.set_ylabel(r"$\psi_n$ (midplane map)",fontsize=9)
     fig.suptitle("Grid topology: red = Bp floor contour, dashed = X-point cuts, "
                  "magenta = PF_limit cut", fontsize=10)
     fig.tight_layout()
@@ -833,7 +834,7 @@ def equilibrium_kink_map(grid_or_path, topo=None, names=None, savedir=None):
     for a in axs[-1]:
         a.set_xlabel("poloidal index")
     for a in axs[:, 0]:
-        a.set_ylabel(r"$\psi_n$")
+        a.set_ylabel(r"$\psi_n$",fontsize=9)
     fig.tight_layout()
     _save(fig, savedir, "equilibrium_kink_map.png")
     _show(fig)
@@ -1024,7 +1025,7 @@ def crash_trace(coeffs, psin, topo, keys=None, timestep=10.0, perturbation=True,
         ax.set_xlabel("time index")
         ax.grid(True, alpha=0.3, which="both")
         ax.legend(fontsize=7, title=r"region ($\gamma\,\tau_A$)", title_fontsize=7)
-    axs[0].set_ylabel("max|f - f(0)| in region" if perturbation else "max|f| in region")
+    axs[0].set_ylabel("max|f - f(0)| in region" if perturbation else "max|f| in region",fontsize=12)
 
     # where is the global max at every output?
     ax = axs[-1]
@@ -1048,7 +1049,7 @@ def crash_trace(coeffs, psin, topo, keys=None, timestep=10.0, perturbation=True,
     ax.set_ylim(x.min(), x.max())
     _overlay_topology(ax, topo, x)
     ax.set_xlabel("poloidal index")
-    ax.set_ylabel(r"$\psi_n$")
+    ax.set_ylabel(r"$\psi_n$",fontsize=12)
     ax.set_title(f"location of max|{LABELS.get(name, name)}|", fontsize=10)
     fig.tight_layout()
     _save(fig, savedir, "crash_trace.png")
@@ -1087,7 +1088,7 @@ def crash_map(coeffs, psin, topo, key="Xe_t", times=None, perturbation=True,
         _overlay_topology(ax, topo, x)
         ax.set_title(f"t = {t}", fontsize=10)
         ax.set_xlabel("poloidal index")
-    axs[0].set_ylabel(r"$\psi_n$ (midplane map)")
+    axs[0].set_ylabel(r"$\psi_n$ (midplane map)",fontsize=12)
     fig.colorbar(pc, ax=list(axs), pad=0.01,
                  label=(r"$\log_{10}|f-f_0|$" if perturbation else r"$\log_{10}|f|$"))
     fig.suptitle(f"{LABELS.get(key, key)}: where the crash lives "
@@ -1138,7 +1139,7 @@ def spike_locator(coeffs, psin, topo, key="Xe_t", t_from=None, savedir=None):
     ax.axvline(topo["pf_cut_ix"] - 0.5, color="m", lw=1.4, label="PF_limit cut")
     ax.axvline(topo["ixsep"] - 0.5, color="k", ls="--", lw=1.0, label="separatrix")
     ax.set_xlabel("radial index ix")
-    ax.set_ylabel("# (row, t) whose largest\n1-cell feature sits here")
+    ax.set_ylabel("# (row, t) whose largest\n1-cell feature sits here",fontsize=12)
     ax.set_title(f"{LABELS.get(key, key)}: radial position of the 2dx spike, t >= {t_from}",
                  fontsize=10)
     lo = max(0, min(topo["pf_cut_ix"], topo["ixsep"]) - 25)
@@ -1359,7 +1360,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     a0.axvline(jomp, color="c", lw=1.0)
     a0.axvline(j, color="lime", lw=1.0)
     a0.set_xlabel("poloidal index (cyan = jomp, green = peak)")
-    a0.set_ylabel(r"$\psi_n$")
+    a0.set_ylabel(r"$\psi_n$",fontsize=12)
     a0.set_title(f"envelope, t = {t}", fontsize=10)
 
     for jj_, c, lab in ((jomp, "c", f"j={jomp} (OMP)"), (j, "g", f"j={j} (peak)")):
@@ -1367,7 +1368,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
         a1.semilogy(x, np.maximum(env_t[:, jj_], fl), color=c, lw=1.3, label=lab)
     _sep_line(a1)
     a1.set_xlabel(r"$\psi_n$")
-    a1.set_ylabel(f"|V_ExB| envelope [{unit}]")
+    a1.set_ylabel(f"|V_ExB| envelope [{unit}]",fontsize=12)
     a1.set_title(f"radial envelope; peak/OMP = "
                  f"{_finite_max(env_t[:, j]) / (_finite_max(env_t[:, jomp]) + TINY):.1e}",
                  fontsize=10)
@@ -1394,7 +1395,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
               f"(V^x ~ d(phi)/dz averages to zero over z).")
     a2.set_title(f"signed, j={j}: rms(2dx residual)/rms(raw) = {frac:.2f}", fontsize=10)
     a2.set_xlabel(r"$\psi_n$")
-    a2.set_ylabel(f"V_ExB [{unit}]")
+    a2.set_ylabel(f"V_ExB [{unit}]",fontsize=12)
     a2.legend(fontsize=7)
     a2.grid(True, alpha=0.3)
 
@@ -1407,7 +1408,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     a3.semilogy(np.arange(nt), [np.nanmax(env[k][:, jomp]) for k in range(nt)],
                 "k--", lw=1.0, label=f"j={jomp}")
     a3.set_xlabel("time index")
-    a3.set_ylabel(f"max envelope [{unit}]")
+    a3.set_ylabel(f"max envelope [{unit}]",fontsize=12)
     a3.set_title("V_ExB growth by region", fontsize=10)
     a3.legend(fontsize=7)
     a3.grid(True, alpha=0.3, which="both")
@@ -1514,7 +1515,7 @@ def nonfinite_report(coeffs, psin, topo=None, keys=None, savedir=None):
     if topo is not None:
         _overlay_topology(ax, topo, x)
     ax.set_xlabel("poloidal index")
-    ax.set_ylabel(r"$\psi_n$")
+    ax.set_ylabel(r"$\psi_n$",fontsize=12)
     ax.set_title(f"non-finite cells of {k0} at its first bad output t={t0}", fontsize=10)
     fig.tight_layout()
     _save(fig, savedir, "nonfinite_map.png")
@@ -1564,7 +1565,7 @@ def background_consistency(coeffs, psin, grid_or_path, jomp=44, savedir=None):
                   f"peak offset = {shift:+d} cells")
             if cc < 0.9:
                 print(f"    -> {k} does NOT have the shape of the grid background")
-        ax.set_ylabel("norm.")
+        ax.set_ylabel("norm.",fontsize=12)
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         _sep_line(ax)
@@ -1605,7 +1606,7 @@ def oddeven_map(coeffs, psin, topo=None, key="Xe_t", times=None, savedir=None):
         ax.set_xlabel("poloidal index")
         print(f"  t={t}: median 2dx fraction {np.nanmedian(frac):.2f} "
               f"(core/SOL upstream rows {np.nanmedian(frac[:, ~topo['leg_y']]) if topo else np.nan:.2f})")
-    axs[0][0].set_ylabel(r"$\psi_n$")
+    axs[0][0].set_ylabel(r"$\psi_n$",fontsize=12)
     fig.colorbar(pc, ax=list(axs[0]), label="local radial 2dx fraction "
                  "(0.5 one-cell spike, 1 checkerboard)")
     fig.suptitle(f"{LABELS.get(key, key)}: radial odd-even content", fontsize=10)
@@ -1644,7 +1645,7 @@ def vorticity_terms(terms, psin, topo, timestep=10.0, savedir=None):
         ax.set_title(rg, fontsize=10)
         ax.set_xlabel("time index")
         ax.grid(True, alpha=0.3, which="both")
-    axs[0][0].set_ylabel("max |term| in region")
+    axs[0][0].set_ylabel("max |term| in region",fontsize=12)
     axs[0][0].legend(fontsize=7)
     fig.suptitle("Vorticity-equation term balance (output_transfer)", fontsize=10)
     fig.tight_layout()
@@ -1698,7 +1699,7 @@ def floor_watch(pert, back, psin, topo, frac=0.05, savedir=None):
     axs[0].axhline(frac, color="r", ls=":", lw=0.9)
     axs[0].axhline(0, color="k", lw=0.8)
     axs[0].set_xlabel("time index")
-    axs[0].set_ylabel("min over plane of total / background")
+    axs[0].set_ylabel("min over plane of total / background",fontsize=9)
     axs[0].legend(fontsize=8)
     axs[0].grid(True, alpha=0.3)
     name, m = last_map
@@ -1707,7 +1708,7 @@ def floor_watch(pert, back, psin, topo, frac=0.05, savedir=None):
     fig.colorbar(pc, ax=axs[1], label=f"min_z {name}_total / {name}0 (last output)")
     _overlay_topology(axs[1], topo, x)
     axs[1].set_xlabel("poloidal index")
-    axs[1].set_ylabel(r"$\psi_n$")
+    axs[1].set_ylabel(r"$\psi_n$",fontsize=12)
     fig.tight_layout()
     _save(fig, savedir, "floor_watch.png")
     _show(fig)
@@ -1762,7 +1763,7 @@ def failed_state_report(data_dir, topo, psin, red=None,
         _overlay_topology(ax, topo, x)
         ax.set_title(f"{v}: log10 failed-state amplitude", fontsize=8)
         ax.set_xlabel("poloidal index")
-    axs[0][0].set_ylabel(r"$\psi_n$")
+    axs[0][0].set_ylabel(r"$\psi_n$",fontsize=12)
     fig.tight_layout()
     _save(fig, savedir, "failed_state.png")
     _show(fig)
@@ -2034,7 +2035,7 @@ def rhs_cost_trace(run_dir, log_names=("BOUT.log.0", "output"), savedir=None):
     fig, ax = plt.subplots(figsize=(7, 3.4))
     ax.semilogy(t, np.maximum(ev, 1), "o-", ms=3)
     ax.set_xlabel(r"sim time [$\tau_A$]")
-    ax.set_ylabel("RHS evals per output")
+    ax.set_ylabel("RHS evals per output",fontsize=12)
     ax.grid(True, alpha=0.3, which="both")
     title = f"solver cost ({os.path.basename(path)})"
     if flag:
@@ -2053,11 +2054,10 @@ def rhs_cost_trace(run_dir, log_names=("BOUT.log.0", "output"), savedir=None):
 
 def profile_summary(red, back, psin, topo, jomp=44, j_leg=None, savedir=None):
     """
-    Total (background + z-averaged perturbation) Te, Ti, Ni at the outboard
-    midplane and in the outer leg at first / middle / last output, plus a table
-    of separatrix and minimum values.  `red` is the output of _load_reduced.
+    Table only: total (background + perturbation) Te, Ti, Ni at the separatrix
+    and minimum values, at the OMP, the outer leg and over the whole plane, at
+    first / middle / last output.
     """
-    x = np.asarray(psin)
     j_leg = topo["ny"] - 2 if j_leg is None else j_leg
     names = [v for v in ("Te", "Ti", "Ni") if v in red and red[v] is not None and v in back]
     if not names:
@@ -2066,39 +2066,126 @@ def profile_summary(red, back, psin, topo, jomp=44, j_leg=None, savedir=None):
     nt = red[names[0]]["mean"].shape[0]
     times = sorted(set([0, nt // 2, nt - 1]))
     isep = topo["ixsep"]
-    fig, axs = plt.subplots(len(names), 2, figsize=(12, 2.8 * len(names)),
-                            sharex=True, squeeze=False)
     print(f"{'':6}{'t':>5}{'OMP sep':>11}{'OMP min':>11}{'leg sep':>11}"
-          f"{'leg min':>11}{'plane min':>11}   (total, grid units)")
-    for row, v in enumerate(names):
+          f"{'leg min':>11}{'plane min':>11}   (total, grid units; j_leg={j_leg})")
+    for v in names:
         b = back[v]
-        for col, (j, lab) in enumerate(((jomp, f"j={jomp} (OMP)"),
-                                        (j_leg, f"j={j_leg} (outer leg)"))):
-            ax = axs[row, col]
-            ax.plot(x, b[:, j], "k--", lw=1.0, label="background")
-            for t, c in zip(times, ("C0", "C1", "C3")):
-                tot = b[:, j] + red[v]["mean"][t, :, j]
-                lo = b[:, j] + red[v]["min"][t, :, j]
-                ax.plot(x, tot, color=c, lw=1.2, label=f"t={t} <total>_z")
-                ax.plot(x, lo, color=c, lw=0.6, ls=":")
-            ax.axhline(0, color="0.5", lw=0.6)
-            _sep_line(ax)
-            ax.set_title(f"{v} {lab}  (dotted = min over z)", fontsize=9)
-            ax.grid(True, alpha=0.3)
-        axs[row, 0].set_ylabel(v)
         for t in times:
             tot = b + red[v]["mean"][t]
             lo = b + red[v]["min"][t]
             print(f"{v:6}{t:>5}{tot[isep, jomp]:>11.4g}{np.nanmin(lo[:, jomp]):>11.4g}"
                   f"{tot[isep, j_leg]:>11.4g}{np.nanmin(lo[:, j_leg]):>11.4g}"
                   f"{np.nanmin(lo):>11.4g}")
-    axs[0, 0].legend(fontsize=7)
-    for a in axs[-1]:
-        a.set_xlabel(r"$\psi_n$")
-    fig.tight_layout()
-    _save(fig, savedir, "profile_summary.png")
-    _show(fig)
-    return fig
+    return None
+
+
+def crash_fields_2d(red, back, psin, topo, grid_or_path, data_dir=None, times=None,
+                    savedir=None):
+    """
+    2-D maps (poloidal index x psi_n) of the quantities behind the current crash
+    hypotheses, one figure per selected output:
+
+      dTe_rms/Te0, dNi_rms/N0   fluctuation level -- where the mode lives
+      min_z Te_tot/Te0          local collapse (H2a)
+      L_Te/dr, L_n/dr           grid cells per gradient length; < ~3 means the
+                                local profile is not resolved and every radial
+                                operator there is stiff (needs ddr_*tot_txy,
+                                Te_txy, ni_txy from bout_save)
+      local q                   hthe*Bt/Bp (flux limiter, chi_neo ~ q^2)
+
+    Prints the location and value of the extreme of each map.
+    """
+    x = np.asarray(psin)
+    have = [v for v in ("Te", "Ni") if red.get(v) is not None and v in back]
+    if not have:
+        print("  no Te/Ni fields loaded -- skipping 2-D maps")
+        return None
+    nt = red[have[0]]["mean"].shape[0]
+    times = [_tidx(t, nt) for t in (times or [nt // 2, nt - 1])]
+
+    g, R = _open_grid(grid_or_path)
+    Rxy, _ = _try(R, g, "Rxy")
+    Bp, _ = _try(R, g, "Bpxy")
+    Bt, _ = _try(R, g, "Btxy")
+    hthe, _ = _try(R, g, "hthe")
+    dx, _ = _try(R, g, "dx")
+    lbar = _scalar(R, g, "rmag", 1.0)
+    drp = _find_npy(data_dir, "dr_m") if data_dir else None
+    if drp is not None:
+        dr = np.asarray(np.load(drp), dtype=float)
+    else:
+        dr = np.abs(dx) / (Rxy * np.maximum(Bp, 0.04)) / lbar
+    qloc = np.abs(hthe * Bt / np.maximum(Bp, 0.04)) if Bt is not None else None
+
+    grads = {}
+    for v, gk, tk in (("Te", "ddr_Tetot_txy", "Te_txy"), ("Ni", "ddr_nitot_txy", "ni_txy")):
+        gp = _find_npy(data_dir, gk) if data_dir else None
+        tp = _find_npy(data_dir, tk) if data_dir else None
+        if gp is not None and tp is not None:
+            grads[v] = (np.load(gp, mmap_mode="r"), np.load(tp, mmap_mode="r"))
+        else:
+            print(f"  L_{v}/dr map skipped: need {gk}.npy and {tk}.npy in {data_dir}")
+
+    jx = np.arange(topo["ny"])
+
+    def show(ax, z, title, cmap, vmin=None, vmax=None, extreme="max"):
+        z = np.where(np.isfinite(z), z, np.nan)
+        pc = ax.pcolormesh(jx, x, z, shading="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
+        plt.colorbar(pc, ax=ax, pad=0.01)
+        _overlay_topology(ax, topo, x)
+        ax.set_title(title, fontsize=9)
+        if np.isfinite(z).any():
+            f = np.nanargmax if extreme == "max" else np.nanargmin
+            i, j = np.unravel_index(f(z), z.shape)
+            ax.plot(j, x[i], "c+", ms=10, mew=1.5)
+            return i, j, z[i, j]
+        return None
+
+    for t in times:
+        panels = []
+        if "Te" in have:
+            panels.append(("dTe_rms / Te0", np.log10(red["Te"]["rms"][t] / np.abs(back["Te"]) + 1e-12),
+                           "magma", None, None, "max", "log10"))
+            panels.append(("min_z Te_tot / Te0",
+                           (back["Te"] + red["Te"]["min"][t]) / back["Te"],
+                           "RdBu", 0, 2, "min", ""))
+        if "Ni" in have and np.nanmax(red["Ni"]["rms"][t]) > 0:
+            panels.append(("dNi_rms / N0", np.log10(red["Ni"]["rms"][t] / np.abs(back["Ni"]) + 1e-12),
+                           "magma", None, None, "max", "log10"))
+        for v in ("Te", "Ni"):
+            if v in grads:
+                gr, tot = grads[v]
+                tt = min(t, gr.shape[0] - 1)
+                L = np.abs(np.asarray(tot[tt], float)) / (np.abs(np.asarray(gr[tt], float)) + TINY)
+                panels.append((f"L_{v} / dr  (cells per gradient length)",
+                               np.log10(np.clip(L / dr, 1e-2, 1e6)), "viridis_r", -0.5, 3,
+                               "min", "log10"))
+        if qloc is not None:
+            panels.append(("local q", qloc, "cividis", None, None, "max", ""))
+
+        ncol = 3
+        nrow = int(np.ceil(len(panels) / ncol))
+        fig, axs = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 3.8 * nrow),
+                                sharex=True, sharey=True, squeeze=False)
+        print(f"\n  2-D maps at output {t}:")
+        for ax, (title, z, cmap, vmin, vmax, ext, unit) in zip(axs.ravel(), panels):
+            r = show(ax, z, (f"log10 " if unit else "") + title, cmap, vmin, vmax, ext)
+            if r:
+                i, j, val = r
+                shown = 10 ** val if unit == "log10" else val
+                print(f"    {ext} of {title:<40} {shown:10.3g} at ix={i} (psi_n {x[i]:.4f}), "
+                      f"iy={j} [{topo['region'][i, j]}]")
+        for ax in axs.ravel()[len(panels):]:
+            ax.axis("off")
+        for ax in axs[-1]:
+            ax.set_xlabel("poloidal index")
+        for ax in axs[:, 0]:
+            ax.set_ylabel(r"$\psi_n$",fontsize=12)
+        fig.suptitle(f"crash-relevant fields at output {t} (+ = extreme)", fontsize=10)
+        fig.tight_layout()
+        _save(fig, savedir, f"crash_fields_2d_t{t}.png")
+        _show(fig)
+    return None
 
 
 def _sep_kink_score(grid_or_path, topo, names=(("Niexp", "Ni0"), ("Teexp", "Te0"),
@@ -2121,7 +2208,40 @@ def _sep_kink_score(grid_or_path, topo, names=(("Niexp", "Ni0"), ("Teexp", "Te0"
 # =========================================================================== #
 # One-shot driver: only the CURRENT crash hypotheses + profile summary
 # =========================================================================== #
-def full_report(run_dir, grid_or_path, coeffs=None, psin=None, jomp=44,
+class _Tee:
+    """Write to the notebook/terminal AND a report file."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st in self.streams:
+            st.write(s)
+
+    def flush(self):
+        for st in self.streams:
+            st.flush()
+
+
+def full_report(*args, savedir="crash_diagnostics", **kw):
+    """
+    Runs the crash report and writes everything it prints to
+    <savedir>/report.txt (paste that file).  Arguments as _full_report.
+    """
+    import sys
+    os.makedirs(savedir, exist_ok=True)
+    path = os.path.join(savedir, "report.txt")
+    old = sys.stdout
+    with open(path, "w") as fh:
+        sys.stdout = _Tee(old, fh)
+        try:
+            out = _full_report(*args, savedir=savedir, **kw)
+        finally:
+            sys.stdout = old
+    print(f"report text written to {os.path.abspath(path)}")
+    return out
+
+
+def _full_report(run_dir, grid_or_path, coeffs=None, psin=None, jomp=44,
                 savedir="crash_diagnostics", PF_limit=True, PF_limit_range=0.98,
                 timestep=10.0, crash_key="Xe_t", chunk=8, run=None, data_dir=None):
     """
@@ -2175,8 +2295,11 @@ def full_report(run_dir, grid_or_path, coeffs=None, psin=None, jomp=44,
                   if data_dir else None)
     back = _grid_backgrounds(grid_or_path)
 
-    head("0  PROFILE SUMMARY")
+    head("0  PROFILE SUMMARY (table)")
     profile_summary(red, back, x, topo, jomp=jomp, savedir=savedir)
+
+    head("2-D MAPS OF CRASH-RELEVANT FIELDS")
+    crash_fields_2d(red, back, x, topo, grid_or_path, data_dir=data_dir, savedir=savedir)
 
     head("H1  SEPARATRIX DEFECTS (equilibrium kinks, one-cell spikes at ixsep)")
     ks = _sep_kink_score(grid_or_path, topo)

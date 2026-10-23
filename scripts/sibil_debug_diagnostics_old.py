@@ -53,8 +53,10 @@ USAGE
                   grid=grid_fname, jomp=jomp)
     dbg.equilibrium_kink_map(grid_fname, topo)
 
-    dbg.full_report(convergent_transport_coeffs, psin_mid, grid_fname,
-                    jomp=jomp, savedir="./crash_diagnostics")
+    # one call: loads the bout_save_submit .npy files from data_dir (no collect)
+    dbg.full_report(run_dir, grid_fname, coeffs=convergent_transport_coeffs,
+                    psin=psin_mid, jomp=jomp, PF_limit=True, data_dir=data_dir,
+                    savedir="./crash_diagnostics")
 
 Hard dependencies: numpy + matplotlib.  ipywidgets, boututils, netCDF4 optional.
 """
@@ -315,6 +317,9 @@ def masked_profile(coeffs, name, j, t=0, eps=MASK_EPS):
 # =========================================================================== #
 def _open_grid(grid_or_path):
     """Accept an open DataFile-like object, a dict, or a path."""
+    if isinstance(grid_or_path, np.ndarray):
+        raise TypeError("grid argument is a numpy array, not a grid file/path. "
+                        "Pass grid_fname (or the open grid) as the grid argument.")
     if hasattr(grid_or_path, "__getitem__") and not isinstance(grid_or_path, str):
         return grid_or_path, (lambda g, k: np.asarray(g[k]))
     try:
@@ -340,6 +345,8 @@ def _try(reader, g, *names):
 
 def _scalar(reader, g, name, default=None):
     v, _ = _try(reader, g, name)
+    if v is None and default is None:
+        raise KeyError(f"'{name}' not found in the grid")
     return default if v is None else float(np.asarray(v).ravel()[0])
 
 
@@ -1611,7 +1618,7 @@ def vorticity_terms(terms, psin, topo, timestep=10.0, savedir=None):
     """
     Which term drives the vorticity growth, per region.  Needs
     output_transfer = true in [highbeta] (no rebuild); then load from the dumps
-    e.g. terms = {k: collect(k, path=run) for k in ("T_R","T_M","T_C","T_G")}
+    full_report loads them from the bout_save_submit .npy files.
       T_C  curvature drive          -> ballooning / interchange
       T_M  B^2 Grad_par(J/B)        -> current / sheath-current (peeling, SBC)
       T_R  Reynolds stress (ExB)    -> nonlinear / numerical advection
@@ -1650,7 +1657,7 @@ def floor_watch(pert, back, psin, topo, frac=0.05, savedir=None):
     """
     Is the TOTAL profile (background + perturbation) collapsing somewhere?
 
-    pert : {"Te": Te(t,x,y[,z]), "Ni": ..., "Ti": ...}  from collect() on BOUT.dmp
+    pert : {"Te": Te(t,x,y[,z]), "Ni": ..., "Ti": ...}  (full_report loads these from .npy)
     back : {"Te": Te0(x,y), ...}  in the SAME normalisation (Teexp/Tebar, Niexp/Nbar;
            with Tebar = Nbar = 1 as in your logs that is just Teexp, Niexp)
 
@@ -1707,51 +1714,53 @@ def floor_watch(pert, back, psin, topo, frac=0.05, savedir=None):
     return fig
 
 
-def failed_state_report(run_dir, topo, psin, varnames=("Ni", "Te", "Ti", "U", "phi",
-                        "Vipar", "Apar"), prefix="BOUT.failed", ref_prefix="BOUT.dmp",
+def failed_state_report(data_dir, topo, psin, red=None,
+                        varnames=("Ni", "Te", "Ti", "U", "phi", "Vipar", "Apar"),
                         savedir=None):
     """
-    Where is the solver state when CVODE gave up?  Reads the state BOUT++ writes
-    on failure (prefix BOUT.failed) and the last good dump, and for each evolved
-    variable reports max|f| and max|f_failed - f_last| with location/region.
-    A crash with flag -3 (mxstep) has NO non-finite values: this is how you find
-    the cells that forced the tiny time steps.
+    Where was the solver state when CVODE gave up?  Uses '<var>_failed*.npy'
+    (or '*failed*<var>*.npy') saved by bout_save_submit from BOUT.failed.* --
+    no collect.  For each variable: max_z|f| location, non-finite count, and,
+    if `red` (reduced last outputs) is given, the change from the last output.
     """
-    from boutdata import collect
+    import glob
     x = np.asarray(psin)
     rows = []
     for v in varnames:
-        try:
-            ff = np.asarray(collect(v, path=run_dir, prefix=prefix, info=False))
-        except Exception as exc:
-            print(f"  {v:<6} not in {prefix}: {exc}")
+        cands = [f for f in glob.glob(os.path.join(data_dir, "*.npy"))
+                 if "failed" in os.path.basename(f).lower()
+                 and os.path.basename(f).lower().replace("failed", "").strip("_.").startswith(v.lower())]
+        if not cands:
             continue
-        ff = ff[-1] if ff.ndim == 4 else ff            # (x, y, z)
-        try:
-            fl = np.asarray(collect(v, path=run_dir, prefix=ref_prefix, tind=-1, info=False))
-            fl = fl[-1] if fl.ndim == 4 else fl
-        except Exception:
-            fl = np.zeros_like(ff)
-        mxg = (ff.shape[0] - x.size) // 2
-        if mxg > 0:
-            ff, fl = ff[mxg:-mxg], fl[mxg:-mxg]
-        d = np.abs(ff - fl)
-        rms = np.sqrt(np.nanmean(np.where(np.isfinite(d), d, np.nan) ** 2, axis=-1))
-        nbad = int((~np.isfinite(ff)).sum())
-        i, j = np.unravel_index(np.nanargmax(rms), rms.shape)
-        rows.append((v, rms))
-        print(f"  {v:<6} non-finite {nbad:>6}   max rms|f_fail - f_last| = {rms[i, j]:.3e} "
-              f"at ix={i} (psi_n {x[i]:.4f}), iy={j} [{topo['region'][i, j]}]")
+        f = np.asarray(np.load(cands[0], mmap_mode="r"), dtype=float)
+        while f.ndim > 3 and f.shape[0] == 1:
+            f = f[0]
+        if f.ndim == 4:
+            f = f[-1]
+        if f.shape[1] == topo["ny"] + 4:
+            f = f[:, 2:-2]
+        amp = np.nanmax(np.abs(np.where(np.isfinite(f), f, np.nan)), axis=-1) \
+            if f.ndim == 3 else np.abs(f)
+        if red is not None and v in red and red[v] is not None:
+            amp = np.abs(amp - np.abs(red[v]["max"][-1]))
+        nbad = int((~np.isfinite(f)).sum())
+        i, j = np.unravel_index(np.nanargmax(amp), amp.shape)
+        rows.append((v, amp))
+        print(f"  {v:<6} ({os.path.basename(cands[0])}) non-finite {nbad:>6}   "
+              f"max {'change' if red else '|f|'} {amp[i, j]:.3e} at ix={i} "
+              f"(psi_n {x[i]:.4f}), iy={j} [{topo['region'][i, j]}]")
     if not rows:
+        print(f"  no *failed*.npy in {data_dir} -- have bout_save_submit also save "
+              f"BOUT.failed.* to enable this section")
         return None
     fig, axs = plt.subplots(1, len(rows), figsize=(3.6 * len(rows), 4), sharey=True,
                             squeeze=False)
-    for ax, (v, rms) in zip(axs[0], rows):
-        pc = ax.pcolormesh(np.arange(rms.shape[1]), x, _log10abs(rms, 8),
+    for ax, (v, amp) in zip(axs[0], rows):
+        pc = ax.pcolormesh(np.arange(amp.shape[1]), x, _log10abs(amp, 8),
                            shading="nearest", cmap="inferno")
         fig.colorbar(pc, ax=ax, pad=0.01)
         _overlay_topology(ax, topo, x)
-        ax.set_title(f"{v}: log10 rms_z|f_fail - f_last|", fontsize=8)
+        ax.set_title(f"{v}: log10 failed-state amplitude", fontsize=8)
         ax.set_xlabel("poloidal index")
     axs[0][0].set_ylabel(r"$\psi_n$")
     fig.tight_layout()
@@ -1913,73 +1922,391 @@ def frozen_field_report(coeffs, rtol=1e-12):
 
 
 # =========================================================================== #
-# One-shot driver
+# Data loading from the bout_save_submit .npy files (used by full_report)
 # =========================================================================== #
-def full_report(coeffs, psin, grid_or_path, jomp=44, j=None, t=-1,
-                savedir="crash_diagnostics", data_dir=None, auto_harmonise=True,
-                PF_limit_range=0.98, timestep=10.0, crash_key="Xe_t",
-                PF_limit=True):
-    """Run every diagnostic in order and save all figures to `savedir`."""
-    j = jomp if j is None else j
+def _find_npy(data_dir, var):
+    """
+    .npy written by bout_save_submit for `var`: '<var>.npy' first, then
+    '<var>_*.npy' (e.g. Te_txyz.npy).  Case-insensitive; never a ddr_/background
+    file.  Returns the path or None.
+    """
+    import glob
+    if not data_dir or not os.path.isdir(data_dir):
+        return None
+    files = sorted(glob.glob(os.path.join(data_dir, "*.npy")))
+    v = var.lower()
+    exact = [f for f in files if os.path.basename(f)[:-4].lower() == v]
+    # bout_save also writes <var>_txy / <var>_xy = TOTAL z-averaged profiles; never use those
+    pref = [f for f in files if os.path.basename(f)[:-4].lower().startswith(v + "_")
+            and "failed" not in f.lower()
+            and not os.path.basename(f)[:-4].lower().endswith(("_txy", "_xy"))]
+    for group in (exact, pref):
+        if group:
+            # prefer the full (t, x, y, z) array if several match
+            group = sorted(group, key=lambda f: -np.load(f, mmap_mode="r").ndim)
+            return group[0]
+    return None
 
-    print("=" * 72)
-    print("0  array shape / provenance consistency")
-    print("=" * 72)
-    chk = check_time_axes(coeffs, psin=psin, data_dir=data_dir, verbose=True)
-    if chk["ragged"] and auto_harmonise:
-        coeffs = harmonise(coeffs, nt=chk["nt"])
-    nt = chk["nt"]
-    t = _tidx(t, nt)
-    j = min(max(int(j), 0), chk["ny"] - 1)
-    print(f"\nusing j = {j}, t = {t}  (nt = {nt}, ny = {chk['ny']})\n")
 
-    print("=" * 72)
-    print("1  grid topology, metric floors, zShift, hyperdiffusion sizing")
-    print("=" * 72)
+def _load_reduced(data_dir, var, nx, ny, chunk=8, verbose=True):
+    """
+    Load `var` from the bout_save_submit .npy in `data_dir` (memory-mapped, no
+    collect) and reduce over z in time chunks.
+
+    Accepts (t, x, y, z) or (t, x, y); y guard cells (ny+4) are dropped.
+    Returns dict(min, max, mean, rms) of shape (t, x, y), plus 't', or None.
+    """
+    path = _find_npy(data_dir, var)
+    if path is None:
+        if verbose:
+            print(f"  {var}: no {var}.npy / {var}_*.npy in {data_dir}")
+        return None
+    a = np.load(path, mmap_mode="r")
+    if a.ndim not in (3, 4) or a.shape[1] != nx:
+        if verbose:
+            print(f"  {var}: {os.path.basename(path)} has shape {a.shape}; expected "
+                  f"(t, {nx}, {ny}[, z]) -- skipped")
+        return None
+    ysl = slice(2, -2) if a.shape[2] == ny + 4 else slice(None)
+    if a[:, :, ysl].shape[2] != ny:
+        if verbose:
+            print(f"  {var}: y extent {a.shape[2]} does not match ny={ny} -- skipped")
+        return None
+    parts = {k: [] for k in ("min", "max", "mean", "rms")}
+    for t0 in range(0, a.shape[0], chunk):
+        c = np.asarray(a[t0:t0 + chunk, :, ysl], dtype=np.float32)
+        if c.ndim == 4:
+            m = c.mean(axis=-1)
+            parts["min"].append(c.min(axis=-1))
+            parts["max"].append(c.max(axis=-1))
+            parts["mean"].append(m)
+            parts["rms"].append(np.sqrt(((c - m[..., None]) ** 2).mean(axis=-1)))
+        else:
+            for k in ("min", "max", "mean"):
+                parts[k].append(c)
+            parts["rms"].append(np.zeros_like(c))
+    out = {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+    tp = _find_npy(data_dir, "t_array")
+    out["t"] = (np.asarray(np.load(tp)) if tp is not None
+                else np.arange(out["mean"].shape[0], dtype=float))
+    if verbose:
+        print(f"  {var}: {os.path.basename(path)} {a.shape} -> {out['mean'].shape[0]} outputs")
+    return out
+
+
+def _grid_backgrounds(grid_or_path):
+    g, R = _open_grid(grid_or_path)
+    back = {}
+    for v, names in (("Te", ("Teexp", "Te0")), ("Ti", ("Tiexp", "Ti0")),
+                     ("Ni", ("Niexp", "Ni0"))):
+        b, _ = _try(R, g, *names)
+        if b is not None:
+            back[v] = np.asarray(b, dtype=float)
+    return back
+
+
+def rhs_cost_trace(run_dir, log_names=("BOUT.log.0", "output"), savedir=None):
+    """
+    RHS evaluations per output parsed from the run log.  A steady climb ending
+    in 'mxstep ... flag = -3' means the system is getting stiffer as the state
+    evolves (profile collapse / hot spots); a flat count followed by a sudden
+    failure means a blow-up.
+    """
+    import re
+    path = None
+    for n in log_names:
+        p = os.path.join(run_dir, n)
+        if os.path.exists(p):
+            path = p
+            break
+    if path is None:
+        print(f"  no log found in {run_dir} (tried {log_names})")
+        return None
+    txt = open(path, errors="ignore").read()
+    pat = re.compile(r"(\d\.\d{3}e[+-]\d{2})\s+(\d+)\s+(\d\.\d{2}e[+-]\d{2})\s")
+    rows = [(float(a), int(b), float(c)) for a, b, c in pat.findall(txt)]
+    if not rows:
+        print(f"  no solver progress lines in {path}")
+        return None
+    t, ev, wall = map(np.asarray, zip(*rows))
+    flag = re.findall(r"flag = (-?\d+)", txt)
+    mx = re.findall(r"At t=([\d.eE+-]+), mxstep", txt)
+    fig, ax = plt.subplots(figsize=(7, 3.4))
+    ax.semilogy(t, np.maximum(ev, 1), "o-", ms=3)
+    ax.set_xlabel(r"sim time [$\tau_A$]")
+    ax.set_ylabel("RHS evals per output")
+    ax.grid(True, alpha=0.3, which="both")
+    title = f"solver cost ({os.path.basename(path)})"
+    if flag:
+        title += f"  |  failed: flag {flag[0]}" + (f" at t={mx[0]}" if mx else "")
+    ax.set_title(title, fontsize=9)
+    fig.tight_layout()
+    _save(fig, savedir, "rhs_cost.png")
+    _show(fig)
+    k = max(3, len(ev) // 5)
+    ratio = np.median(ev[-k:]) / max(np.median(ev[:k]), 1)
+    print(f"  outputs logged {len(ev)}, RHS evals first-{k} median {np.median(ev[:k]):.0f}, "
+          f"last-{k} median {np.median(ev[-k:]):.0f} (x{ratio:.1f})"
+          + (f"; failure flag {flag[0]}" if flag else ""))
+    return dict(t=t, evals=ev, ratio=ratio, flag=int(flag[0]) if flag else None)
+
+
+def profile_summary(red, back, psin, topo, jomp=44, j_leg=None, savedir=None):
+    """
+    Total (background + z-averaged perturbation) Te, Ti, Ni at the outboard
+    midplane and in the outer leg at first / middle / last output, plus a table
+    of separatrix and minimum values.  `red` is the output of _load_reduced.
+    """
+    x = np.asarray(psin)
+    j_leg = topo["ny"] - 2 if j_leg is None else j_leg
+    names = [v for v in ("Te", "Ti", "Ni") if v in red and red[v] is not None and v in back]
+    if not names:
+        print("  no profiles to summarise")
+        return None
+    nt = red[names[0]]["mean"].shape[0]
+    times = sorted(set([0, nt // 2, nt - 1]))
+    isep = topo["ixsep"]
+    fig, axs = plt.subplots(len(names), 2, figsize=(12, 2.8 * len(names)),
+                            sharex=True, squeeze=False)
+    print(f"{'':6}{'t':>5}{'OMP sep':>11}{'OMP min':>11}{'leg sep':>11}"
+          f"{'leg min':>11}{'plane min':>11}   (total, grid units)")
+    for row, v in enumerate(names):
+        b = back[v]
+        for col, (j, lab) in enumerate(((jomp, f"j={jomp} (OMP)"),
+                                        (j_leg, f"j={j_leg} (outer leg)"))):
+            ax = axs[row, col]
+            ax.plot(x, b[:, j], "k--", lw=1.0, label="background")
+            for t, c in zip(times, ("C0", "C1", "C3")):
+                tot = b[:, j] + red[v]["mean"][t, :, j]
+                lo = b[:, j] + red[v]["min"][t, :, j]
+                ax.plot(x, tot, color=c, lw=1.2, label=f"t={t} <total>_z")
+                ax.plot(x, lo, color=c, lw=0.6, ls=":")
+            ax.axhline(0, color="0.5", lw=0.6)
+            _sep_line(ax)
+            ax.set_title(f"{v} {lab}  (dotted = min over z)", fontsize=9)
+            ax.grid(True, alpha=0.3)
+        axs[row, 0].set_ylabel(v)
+        for t in times:
+            tot = b + red[v]["mean"][t]
+            lo = b + red[v]["min"][t]
+            print(f"{v:6}{t:>5}{tot[isep, jomp]:>11.4g}{np.nanmin(lo[:, jomp]):>11.4g}"
+                  f"{tot[isep, j_leg]:>11.4g}{np.nanmin(lo[:, j_leg]):>11.4g}"
+                  f"{np.nanmin(lo):>11.4g}")
+    axs[0, 0].legend(fontsize=7)
+    for a in axs[-1]:
+        a.set_xlabel(r"$\psi_n$")
+    fig.tight_layout()
+    _save(fig, savedir, "profile_summary.png")
+    _show(fig)
+    return fig
+
+
+def _sep_kink_score(grid_or_path, topo, names=(("Niexp", "Ni0"), ("Teexp", "Te0"),
+                                               ("Tiexp", "Ti0"), ("Jpar0", "jpar0"))):
+    """Max radial kink indicator K within ixsep-3..ixsep+2, over upstream rows."""
+    g, R = _open_grid(grid_or_path)
+    i0, i1 = topo["ixsep"] - 3, topo["ixsep"] + 3
+    up = ~topo["leg_y"]
+    out = {}
+    for alts in names:
+        f, used = _try(R, g, *alts)
+        if f is None or f.ndim != 2:
+            continue
+        fp, fm = f[2:], f[:-2]
+        k = np.abs(fp - 2 * f[1:-1] + fm) / (0.5 * np.abs(fp - fm) + 1e-3 * _finite_max(f) + TINY)
+        out[used] = float(np.max(k[i0 - 1:i1 - 1][:, up]))
+    return out
+
+
+# =========================================================================== #
+# One-shot driver: only the CURRENT crash hypotheses + profile summary
+# =========================================================================== #
+def full_report(run_dir, grid_or_path, coeffs=None, psin=None, jomp=44,
+                savedir="crash_diagnostics", PF_limit=True, PF_limit_range=0.98,
+                timestep=10.0, crash_key="Xe_t", chunk=8, run=None, data_dir=None):
+    """
+    No collect calls: fields come from the bout_save_submit .npy files in
+    `data_dir` (default <run_dir>/numpy, else run_dir), memory-mapped.  Only the
+    text log (BOUT.log.0 / output) is read from `run_dir`.  `coeffs` is optional.
+
+    Sections = the hypotheses currently on the table:
+      0  profiles      total Te/Ti/Ni at OMP and outer leg, separatrix/min table
+      H1 separatrix    equilibrium kinks at ix ~ ixsep, one-cell spikes there
+      H2 collapse      min(total/background) vs time (floor_watch) + solver cost
+      H3 legs/sheath   region growth, crash map, failed-state location
+      H4 drive         vorticity term balance (if output_transfer = true)
+      V  verdict       one line per hypothesis
+    """
+    # Old call style: full_report(coeffs, psin, grid, ..., run=<run dir>)
+    if isinstance(run_dir, dict):
+        coeffs, psin, grid_or_path, run_dir = run_dir, grid_or_path, coeffs, run
+        print("full_report: old argument order detected -> using "
+              "coeffs, psin, grid = args[0:3]" +
+              ("" if run_dir else ";  pass run=<run directory> to enable the "
+               "dump-based sections (profiles, floor_watch, solver cost, failed "
+               "state, vorticity terms)"))
+    if grid_or_path is None or isinstance(grid_or_path, np.ndarray):
+        raise TypeError("full_report needs the grid file as its grid argument: "
+                        "full_report(run_dir, grid_fname, coeffs=..., psin=...)")
+    os.makedirs(savedir, exist_ok=True)
+    verdict = {}
+
+    def head(s):
+        print("\n" + "=" * 72 + f"\n{s}\n" + "=" * 72)
+
+    head("TOPOLOGY")
     topo = topology_check(grid_or_path, PF_limit_range=PF_limit_range,
                           PF_limit=PF_limit, savedir=savedir)
+    if psin is None:
+        g, R = _open_grid(grid_or_path)
+        psixy, _ = _try(R, g, "psixy")
+        pa, _ = _try(R, g, "psi_axis")
+        pb, _ = _try(R, g, "psi_bdry", "psi_bndry")
+        psin = ((psixy - pa) / (pb - pa))[:, jomp]
+    x = np.asarray(psin)
 
-    print("=" * 72)
-    print("2  WHERE IS THE CRASH")
-    print("=" * 72)
-    nonfinite_report(coeffs, psin, topo, savedir=savedir)
-    crash_trace(coeffs, psin, topo, timestep=timestep, savedir=savedir)
-    if crash_key in coeffs:
-        crash_map(coeffs, psin, topo, key=crash_key, savedir=savedir)
-        spike_locator(coeffs, psin, topo, key=crash_key, savedir=savedir)
-        parallel_structure(coeffs, psin, topo, key=crash_key, savedir=savedir)
-        oddeven_map(coeffs, psin, topo, key=crash_key, savedir=savedir)
-    poloidal_localization(coeffs, psin, t=t, jomp=jomp, topo=topo, savedir=savedir)
-    background_consistency(coeffs, psin, grid_or_path, jomp=jomp, savedir=savedir)
+    if data_dir is None and run_dir:
+        cand = os.path.join(run_dir, "numpy")
+        data_dir = cand if os.path.isdir(cand) else run_dir
+    red = {}
+    head("LOADING .npy from " + (os.path.abspath(data_dir) if data_dir else "<no data_dir>"))
+    for v in ("Te", "Ti", "Ni"):
+        red[v] = (_load_reduced(data_dir, v, topo["nx"], topo["ny"], chunk=chunk)
+                  if data_dir else None)
+    back = _grid_backgrounds(grid_or_path)
 
-    print("=" * 72)
-    print("3  growth and grid-scale content")
-    print("=" * 72)
-    growth_report(coeffs, psin, timestep=timestep, savedir=savedir)
-    sawtooth_report(coeffs, psin, j=j, savedir=savedir)
+    head("0  PROFILE SUMMARY")
+    profile_summary(red, back, x, topo, jomp=jomp, savedir=savedir)
 
-    print("=" * 72)
-    print("4  V_ExB")
-    print("=" * 72)
-    if "Vexbx_txy" in coeffs:
-        plot_vexb(coeffs["Vexbx_txy"], psin, topo, grid=grid_or_path, t=t,
-                  jomp=jomp, savedir=savedir)
-    velocity_consistency(coeffs, psin, j=j, t=t, grid=grid_or_path, savedir=savedir)
+    head("H1  SEPARATRIX DEFECTS (equilibrium kinks, one-cell spikes at ixsep)")
+    ks = _sep_kink_score(grid_or_path, topo)
+    for k, v in ks.items():
+        print(f"  {k:<7} max radial kink K within ixsep-3..+2 (upstream rows) = {v:.2f}"
+              + ("   <-- corner" if v > 0.5 else ""))
+    equilibrium_kink_map(grid_or_path, topo, names=[("Teexp", "Te0"), ("Tiexp", "Ti0"),
+                         ("Niexp", "Ni0"), ("Jpar0", "jpar0")], savedir=savedir)
+    near = None
+    if coeffs is not None and crash_key in coeffs:
+        spike_locator(coeffs, x, topo, key=crash_key, savedir=savedir)
+        a = np.asarray(coeffs[crash_key], dtype=float)
+        ups = np.flatnonzero(~topo["leg_y"])
+        hits = []
+        for t in range(a.shape[0] // 2, a.shape[0]):
+            for jj in ups:
+                y = np.where(np.isfinite(a[t, :, jj]), a[t, :, jj], 0.0)
+                oe = odd_even_amplitude(y)
+                if oe.max() > 0:
+                    hits.append(int(np.argmax(oe)))
+        if hits:
+            near = np.mean(np.abs(np.asarray(hits) - topo["ixsep"]) <= 2)
+            print(f"  upstream one-cell spikes within ixsep+-2: {near:.0%}")
+    verdict["H1 separatrix"] = (max(ks.values(), default=0) > 0.5 or (near or 0) > 0.3,
+                                f"max kink K {max(ks.values(), default=0):.2f}"
+                                + (f", {near:.0%} of upstream spikes at ixsep+-2" if near is not None else ""))
 
-    print("=" * 72)
-    print("5  equilibrium smoothness")
-    print("=" * 72)
-    check_grid_equilibrium(grid_or_path, jomp=jomp, savedir=savedir)
-    equilibrium_kink_map(grid_or_path, topo, savedir=savedir)
+    head("H2  PROFILE COLLAPSE / STIFFNESS")
+    pert = {v: red[v]["min"] for v in red if red[v] is not None and v in back}
+    rmin_last = None
+    if not pert:
+        miss_dmp = [v for v in red if red[v] is None]
+        miss_grid = [v for v in ("Te", "Ti", "Ni") if v not in back]
+        print("  floor_watch SKIPPED: "
+              + ("no data_dir given (pass data_dir=<numpy dir> or run=<run dir>); "
+                 if not data_dir else
+                 f"no usable {miss_dmp} .npy in {data_dir} (see LOADING above); "
+                 if miss_dmp else "")
+              + (f"no background for {miss_grid} in the grid (Teexp/Tiexp/Niexp)"
+                 if miss_grid else ""))
+    if pert:
+        floor_watch(pert, {v: back[v] for v in pert}, x, topo, savedir=savedir)
+        rmin_t = np.min([np.nanmin((back[v][None] + pert[v]) / back[v][None], axis=(1, 2))
+                         for v in pert], axis=0)
+        rmin_last = float(rmin_t[-1])
+        below = np.flatnonzero(rmin_t < 0.9)
+        t_drop = int(below[0]) if below.size else None
+        print(f"  min total/background: {rmin_t[0]:.3f} at t=0, {rmin_last:.3f} at last output"
+              + (f"; first < 0.9 at output {t_drop} of {rmin_t.size - 1}" if t_drop is not None
+                 else "; never < 0.9"))
+    cost = rhs_cost_trace(run_dir, savedir=savedir) if run_dir else None
+    verdict["H2a profile collapse"] = (
+        None if rmin_last is None else rmin_last < 0.5,
+        "no profiles" if rmin_last is None else
+        f"min total/background {rmin_last:.2f} at last output"
+        + (f" (drop starts at output {t_drop})" if t_drop is not None else ""))
+    verdict["H2b stiffness"] = (
+        None if cost is None else cost["ratio"] > 2,
+        "no log" if cost is None else
+        f"RHS cost x{cost['ratio']:.1f}" + (f", flag {cost['flag']}" if cost["flag"] is not None else ""))
 
-    print("=" * 72)
-    print("6  chi 0/0 artifact and frozen fields")
-    print("=" * 72)
-    chi_artifact_report(coeffs, psin, j=j, t=t, savedir=savedir)
-    frozen_field_report(coeffs)
+    head("H3  LEGS / SHEATH / PF")
+    leg_vs_up = None
+    if coeffs is not None:
+        crash_trace(coeffs, x, topo, timestep=timestep, savedir=savedir)
+        if crash_key in coeffs:
+            crash_map(coeffs, x, topo, key=crash_key, savedir=savedir)
+            a = np.abs(np.asarray(coeffs[crash_key], dtype=float))
+            d = np.abs(a[-1] - a[0])
+            legmax = np.nanmax(np.where(topo["leg_y"][None, :], d, np.nan))
+            upmax = np.nanmax(np.where(~topo["leg_y"][None, :], d, np.nan))
+            leg_vs_up = legmax / (upmax + TINY)
+    elif red.get("Te") is not None:
+        d = red["Te"]["rms"][-1]
+        leg_vs_up = (np.nanmax(d[:, topo["leg_y"]]) /
+                     (np.nanmax(d[:, ~topo["leg_y"]]) + TINY))
+    leg_frac = band_frac = None
+    if coeffs is not None and crash_key in coeffs:
+        a = np.asarray(coeffs[crash_key], dtype=float)
+        d = np.abs(a - a[0])
+        ts = range(max(1, 2 * a.shape[0] // 3), a.shape[0])
+        locs = [np.unravel_index(np.nanargmax(np.where(np.isfinite(d[t]), d[t], -1)), d[t].shape)
+                for t in ts]
+        leg_frac = np.mean([topo["leg_y"][j] for _, j in locs])
+        band = range(topo["pf_cut_ix"] - 3, topo["ixsep"])
+        band_frac = np.mean([(i in band) and topo["leg_y"][j] for i, j in locs])
+        print(f"  last third: global max of {crash_key} in leg rows {leg_frac:.0%} of outputs; "
+              f"in the leg PF band ix {band.start}..{band.stop - 1} (next to the separatrix) "
+              f"{band_frac:.0%}")
+    if leg_vs_up is not None:
+        print(f"  leg / upstream amplitude at last output: {leg_vs_up:.2e}")
+    failed_where = None
+    if data_dir and failed_state_report(data_dir, topo, x, red=red, savedir=savedir):
+        failed_where = "see failed_state.png"
+    verdict["H3 legs/sheath"] = ((leg_vs_up or 0) > 10 or (leg_frac or 0) > 0.5,
+                                 (f"max in legs {leg_frac:.0%} of late outputs "
+                                  f"({band_frac:.0%} in leg PF band next to sep), "
+                                  if leg_frac is not None else "")
+                                 + (f"leg/upstream {leg_vs_up:.1e}" if leg_vs_up else "n/a")
+                                 + (f", {failed_where}" if failed_where else ""))
 
+    head("H4  DRIVE (vorticity terms, needs output_transfer = true)")
+    terms = {}
+    for k in ("T_C", "T_M", "T_R", "T_G"):
+        r = (_load_reduced(data_dir, k, topo["nx"], topo["ny"], chunk=chunk, verbose=False)
+             if data_dir else None)
+        if r is not None:
+            terms[k] = np.sqrt(r["mean"] ** 2 + r["rms"] ** 2)
+    if terms:
+        vorticity_terms(terms, x, topo, timestep=timestep, savedir=savedir)
+        lead = {}
+        for rg in ("core", "SOL upstream", "leg SOL", "leg PF"):
+            m = topo["region"] == rg
+            if m.any():
+                lead[rg] = max(terms, key=lambda k: np.nanmax(terms[k][-1][m]))
+        print("  leading term at last output: " +
+              ", ".join(f"{rg}: {k}" for rg, k in lead.items()))
+        verdict["H4 drive"] = ("info", "; ".join(f"{rg}: {k}" for rg, k in lead.items()))
+    else:
+        print(f"  no T_C/T_M/T_R/T_G .npy in {data_dir} (needs output_transfer = true "
+              f"and bout_save_submit saving those variables)")
+        verdict["H4 drive"] = (None, "not available")
+
+    head("VERDICT")
+    for k, (flag, msg) in verdict.items():
+        mark = ("INFO      " if flag == "info" else "SUPPORTED " if flag
+                else "n/a       " if flag is None else "not seen  ")
+        print(f"  {k:<20} {mark} {msg}")
     print("\nAll figures written to:", os.path.abspath(savedir))
-    return topo
+    return topo, verdict
 
 
 INTERPRETATION = """

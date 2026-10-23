@@ -53,7 +53,11 @@ from boutdata.collect import collect
 from boutdata.data import BoutData
 from boututils.datafile import DataFile
 
-HEAT_COEFF = 1.5      # 1.5 internal energy, 2.5 total enthalpy
+HEAT_COEFF = 1.5      # 1.5 internal energy, 2.5 total enthalpy (Zhang 2019 uses 1.0)
+MU0 = 4.0e-7 * np.pi
+QE = 1.602176634e-19
+DENSITY = 1.0e20      # BOUT.inp [highbeta] density
+ZI = 1.0
 REL_EPS = 1.0e-3      # mask |grad| < REL_EPS * max|grad|
 MANIFEST = ".provenance.json"
 
@@ -569,6 +573,10 @@ def bout_save_data(data_dir, grid_fname, var_names, time, debug,
         Bpxy = np.asarray(g["Bpxy"], dtype=float)
         dxg = np.asarray(g["dx"], dtype=float)
         g13 = np.asarray(g["g13"], dtype=float) if "g13" in gkeys else None
+        # model normalisation (6f: Lbar = rmag, Bbar = bmag when present)
+        Lbar = float(np.asarray(g["rmag"]).ravel()[0]) if "rmag" in gkeys else 1.0
+        Bbar = float(np.asarray(g["bmag"]).ravel()[0]) if "bmag" in gkeys else 1.0
+        Nbar = float(np.asarray(g["Nixexp"]).ravel()[0]) if "Nixexp" in gkeys else 1.0
 
     dr = radial_arclength(Rxy, Zxy)
     put("dr_m", dr)
@@ -699,14 +707,25 @@ def bout_save_data(data_dir, grid_fname, var_names, time, debug,
     qe = np.zeros(Ni.shape[:3])
     qi = np.zeros(Ni.shape[:3])
     Vr_mean = np.zeros(Ni.shape[:3])
+    Gamma_E = np.zeros(Ni.shape[:3])
+    Gamma_M = np.zeros(Ni.shape[:3])
+
+    # Vbtilde = -b0 x grad(A_par)/B0 is the field-line tilt b_r = dB_r/B0
+    # (dimensionless), NOT a velocity.  Flutter particle flux as in
+    # Zhang et al. PoP 26 012508 (2019) eq. 20:  <J_par b_r> / (Z_i e).
+    # jpar is normalised as mu0*Lbar*J/Bbar; the result is converted to the
+    # code density units (Nbar*density) so it adds to <n V_ExB>.
+    jpar = load_var(numpy_dir, "jpar")
+    jfac = Bbar / (MU0 * Lbar) / (ZI * QE) / (Nbar * DENSITY)
 
     # Vexb.covariant = false in the model, so Vexbx is the CONTRAVARIANT
     # component V^x = V.grad(psi).  The physical radial velocity is
     # V^x / |grad psi| = V^x / sqrt(g11).  Without this the ratio
     # flux/gradient is wrong by a factor g11 = (R Bp)^2, which varies
     # fastest exactly at the separatrix.
-    inv_sg11 = 1.0 / np.where(sqrt_g11 == 0, np.nan, sqrt_g11)
-    print("  applying 1/sqrt(g11) to Vexbx, Vbtildx (contravariant -> physical)")
+    # Vexbx is normalised: divide by the NORMALISED sqrt(g11) = R*Bp/(Lbar*Bbar)
+    inv_sg11 = (Lbar * Bbar) / np.where(sqrt_g11 == 0, np.nan, sqrt_g11)
+    print(f"  applying Lbar*Bbar/sqrt(g11) to Vexbx, Vbtildx  (Lbar={Lbar:g} m, Bbar={Bbar:g} T)")
 
     Vexbx_txy = np.zeros(Ni.shape[:3])
     Vbtildx_txy = np.zeros(Ni.shape[:3])
@@ -714,24 +733,30 @@ def bout_save_data(data_dir, grid_fname, var_names, time, debug,
     print("Computing <f*Vr>_z one timestep at a time")
     for t in range(nt):
         ve = np.asarray(Vexbx[t], dtype=float) * inv_sg11[:, :, None] * Va
-        vb = np.asarray(Vbtildx[t], dtype=float) * inv_sg11[:, :, None] * Va
-        vr = ve + vb
+        br = np.asarray(Vbtildx[t], dtype=float) * inv_sg11[:, :, None]
         Vexbx_txy[t] = ve.mean(axis=2)
-        Vbtildx_txy[t] = vb.mean(axis=2)
-        del ve, vb
+        Vbtildx_txy[t] = br.mean(axis=2)
         n_t = np.asarray(Ni[t], dtype=float) + N0[:, :, None]
+        Gamma_E[t] = (n_t * ve).mean(axis=2)
+        Gamma_M[t] = jfac * (np.asarray(jpar[t], dtype=float) * br).mean(axis=2)
         te_t = np.asarray(Te[t], dtype=float) + Te0[:, :, None]
         ti_t = np.asarray(Ti[t], dtype=float) + Ti0[:, :, None]
 
-        Gamma[t] = (n_t * vr).mean(axis=2)
-        qe[t] = heat_coeff * (te_t * vr).mean(axis=2)
-        qi[t] = heat_coeff * (ti_t * vr).mean(axis=2)
-        Vr_mean[t] = vr.mean(axis=2)
+        # heat flux: ExB part only (eq. 21 flutter term needs kappa_par)
+        Gamma[t] = Gamma_E[t] + Gamma_M[t]
+        qe[t] = heat_coeff * (te_t * ve).mean(axis=2)
+        qi[t] = heat_coeff * (ti_t * ve).mean(axis=2)
+        Vr_mean[t] = ve.mean(axis=2)
 
-        del vr, n_t, te_t, ti_t
+        del ve, br, n_t, te_t, ti_t
     gc.collect()
 
     put("Gamma_txy", Gamma)
+    put("Gamma_E_txy", Gamma_E)
+    put("Gamma_M_txy", Gamma_M)
+    jj_ = min(jomp, Gamma.shape[2] - 1)
+    print(f"  peak |Gamma_ExB| = {np.nanmax(np.abs(Gamma_E[-1, :, jj_])):.3e}   "
+          f"peak |Gamma_flutter| = {np.nanmax(np.abs(Gamma_M[-1, :, jj_])):.3e}   (last output, j={jj_})")
     put("qe_txy", qe)
     put("qi_txy", qi)
 
@@ -769,16 +794,17 @@ def bout_save_data(data_dir, grid_fname, var_names, time, debug,
 
     # -- 6. transport coefficients -----------------------------------------
     print("\nTransport coefficients")
-    Da_t = -safe_div(Gamma, grad_ni)
-    Xe_t = -safe_div(qe, grad_Te)
-    Xi_t = -safe_div(qi, grad_Ti)
+    # ddr_* = sqrt(g11)*DDX in normalised units = Lbar * d/dr  ->  x Lbar
+    Da_t = -Lbar * safe_div(Gamma, grad_ni)
+    Xe_t = -Lbar * safe_div(qe, grad_Te)
+    Xi_t = -Lbar * safe_div(qi, grad_Ti)
     put("Da_t", Da_t)
     put("Xe_t", Xe_t)
     put("Xi_t", Xi_t)
 
-    Da_eff = -safe_div(np.nanmean(Gamma, axis=0), np.nanmean(grad_ni, axis=0))
-    Xe_eff = -safe_div(np.nanmean(qe, axis=0), np.nanmean(grad_Te, axis=0))
-    Xi_eff = -safe_div(np.nanmean(qi, axis=0), np.nanmean(grad_Ti, axis=0))
+    Da_eff = -Lbar * safe_div(np.nanmean(Gamma, axis=0), np.nanmean(grad_ni, axis=0))
+    Xe_eff = -Lbar * safe_div(np.nanmean(qe, axis=0), np.nanmean(grad_Te, axis=0))
+    Xi_eff = -Lbar * safe_div(np.nanmean(qi, axis=0), np.nanmean(grad_Ti, axis=0))
     for nm, a in (("Da_eff", Da_eff), ("Xe_eff", Xe_eff), ("Xi_eff", Xi_eff)):
         put(nm, a)
     for nm, a in (("Da", Da_eff), ("Xe", Xe_eff), ("Xi", Xi_eff)):
@@ -811,7 +837,7 @@ def find_grid(data_dir):
 if __name__ == "__main__":
 
     default_vars = ["N0", "Ni", "Ti", "Ti0", "Te", "Te0", "Va",
-                    "U", "Phi", "Vexbx", "Vbtildx",
+                    "U", "Phi", "Vexbx", "Vbtildx", "jpar",
                     "ddr_nitot", "ddr_Titot", "ddr_Tetot",
                     "ddr_ni", "ddr_Ti", "ddr_Te",
                     "T_R", "T_M", "T_C", "T_G"]
@@ -863,6 +889,7 @@ if __name__ == "__main__":
                 "ddr_ni_txy.npy", "ddr_Te_txy.npy", "ddr_Ti_txy.npy",
                 "ddr_nitot_txy.npy", "ddr_Tetot_txy.npy", "ddr_Titot_txy.npy",
                 "Vexbx_txy.npy", "Vbtildx_txy.npy", "Vr_t.npy", "Vr.npy",
+                "Gamma_E_txy.npy", "Gamma_M_txy.npy",
                 "sqrt_g11.npy", "orthogonality.npy",
                 "ni_txy.npy", "Te_txy.npy", "Ti_txy.npy",
                 "dr_m.npy", "Ti0.npy", "Te0.npy", "N0.npy",

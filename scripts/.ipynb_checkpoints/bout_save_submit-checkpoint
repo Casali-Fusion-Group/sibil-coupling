@@ -1,157 +1,102 @@
 #!/bin/bash
-#SBATCH -N 1
-#SBATCH -A m4491
-#SBATCH -C cpu
-#SBATCH -J bout_save_data
-#SBATCH -q debug
-#SBATCH -t 00:30:00
-#SBATCH -o output_%j.log
-#SBATCH -e output_%j.log
-
 # ---------------------------------------------------------------------------
-# Self-submitting launcher for the `bout_save` python script.
+# Login-node launcher for the `bout_save` python script.
 #
-# Install: put this file (and `bout_save`) in your scripts directory,
-#          chmod +x it, and make sure that directory is on your PATH.
-#          Optionally symlink without the extension:
-#              ln -s bout_save_submit.sh bout_save_submit
+# Submits `save_submit_backend.sh` as a chain of up to SAVE_TRIES attempts:
 #
-# Usage:   bout_save_submit /path/to/data [extra args for bout_save]
-#          bout_save_submit .
+#   attempt 1 : runs after $SAVE_AFTER (e.g. afterany:<bout_jobid>), or now
+#   attempt 2 : afternotok:<a1>          -> only if attempt 1 failed/timed out
+#   attempt 3 : afternotok:<a1>:<a2>     -> only if attempts 1 AND 2 failed
 #
-# Run directly, it validates arguments and sbatch's ITSELF. SLURM then
-# re-executes this same file on a compute node, where SLURM_JOB_ID is set
-# and the payload at the bottom runs.
+# Once an attempt succeeds, every later attempt's dependency can never be
+# satisfied and --kill-on-invalid-dep removes it from the queue.  Attempt N
+# depends on ALL earlier attempts (not just N-1) so that a cancelled
+# never-satisfied job is not mistaken for a failure.
 #
-# NOTE: sbatch copies the batch script into SLURM's spool directory, so
-# $0 / BASH_SOURCE inside the job does NOT point back at your scripts
-# directory. All paths are therefore resolved during the submit phase and
-# passed to the job through --export.
+# Environment overrides:
+#   SAVE_AFTER   dependency for attempt 1      (default: none)
+#   SAVE_QOS     QOS for every attempt         (default: premium)
+#   SAVE_TIME    walltime for every attempt    (default: 00:30:00)
+#   SAVE_TRIES   number of attempts            (default: 3)
 #
-# NOTE: `bout_save` has no .py extension. That is fine for execution --
-# `python /path/to/bout_save` runs it regardless of extension -- but it
-# does mean the file cannot be `import`ed as a module. It is always
-# invoked through the interpreter here rather than relying on a shebang,
-# so the `module load python` interpreter is the one that gets used.
+# Usage:   bout_save_submit.sh [DATA_DIR] [bout_save args...]
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
 
 PAYLOAD_NAME="bout_save"
+BACKEND_NAME="save_submit_backend.sh"
 
-if [ -z "${SLURM_JOB_ID:-}" ]; then
-    # =====================================================================
-    # SUBMIT PHASE  (login node)
-    # =====================================================================
+SAVE_AFTER="${SAVE_AFTER:-}"
+SAVE_QOS="${SAVE_QOS:-debug}"
+SAVE_TIME="${SAVE_TIME:-00:30:00}"
+SAVE_TRIES="${SAVE_TRIES:-1}"
 
-    # Default to the current directory.  $1 is consumed as DATA_DIR only if
-    # it is a non-flag that names an existing directory; otherwise it is
-    # left in "$@" and forwarded to bout_save.
-    #
-    #   [ "$#" -gt 0 ]           -> bare `shift` returns nonzero and would
-    #                               kill the script under `set -e`.
-    #   [ "${1#-}" = "$1" ]      -> true only when $1 does NOT start with '-'.
-    #   [ -d "$1" ]              -> the actual "is this a path?" test.
-    DATA_DIR="."
-    if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ] && [ -d "$1" ]; then
-        DATA_DIR="$1"
-        shift
-    fi
-
-    # A leading non-flag that survived the block above is a typo'd path (or
-    # a stray positional).  Fail loudly rather than silently using $PWD.
-    if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
-        echo "Error: '$1' is not a directory and not a flag." >&2
-        echo "Usage: $(basename "$0") [DATA_DIR] [bout_save args...]" >&2
-        exit 1
-    fi
-
-    # Absolute path, so "." works from anywhere.
-    DATA_DIR="$(cd "$DATA_DIR" && pwd)"
-
-    # Resolve this script's real location (follows symlinks, PATH-safe)
-    SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-    SCRIPT_DIR="$(dirname "$SELF")"
-    PY_SCRIPT="$SCRIPT_DIR/$PAYLOAD_NAME"
-
-    if [ ! -f "$PY_SCRIPT" ]; then
-        echo "Error: $PAYLOAD_NAME not found in $SCRIPT_DIR" >&2
-        exit 1
-    fi
-
-    # Only BOUT_SAVE_PY goes through --export: a single value with no commas
-    # and no spaces (assuming a sane path).  Everything else rides in "$@".
-    #
-    # --chdir makes the JOB start in DATA_DIR, so output_%j.log and
-    # error_%j.log land alongside the data instead of in $PWD.
-    sbatch --chdir="$DATA_DIR" \
-           --export=ALL,BOUT_SAVE_PY="$PY_SCRIPT" \
-           "$SELF" "$@"
-
-    echo "Submitted: $PY_SCRIPT"
-    echo "Workdir:   $DATA_DIR"
-    exit 0
+DATA_DIR="."
+if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ] && [ -d "$1" ]; then
+    DATA_DIR="$1"
+    shift
 fi
 
-# =====================================================================
-# JOB PHASE  (compute node, cwd = DATA_DIR)
-# =====================================================================
-if [ -z "${BOUT_SAVE_PY:-}" ]; then
-    echo "Error: BOUT_SAVE_PY is not set." >&2
-    echo "This script must be submitted via itself, not with a bare 'sbatch'." >&2
+if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    echo "Error: '$1' is not a directory and not a flag." >&2
+    echo "Usage: $(basename "$0") [DATA_DIR] [bout_save args...]" >&2
     exit 1
 fi
 
-if [ ! -f "$BOUT_SAVE_PY" ]; then
-    echo "Error: payload not found: $BOUT_SAVE_PY" >&2
+DATA_DIR="$(cd "$DATA_DIR" && pwd)"
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SELF")"
+PY_SCRIPT="$SCRIPT_DIR/$PAYLOAD_NAME"
+BACKEND_SCRIPT="$SCRIPT_DIR/$BACKEND_NAME"
+
+if [ ! -f "$PY_SCRIPT" ]; then
+    echo "Error: $PAYLOAD_NAME not found in $SCRIPT_DIR" >&2
     exit 1
 fi
 
-# OpenMP settings (single core)
-export OMP_NUM_THREADS=1
-export OMP_PLACES=threads
-export OMP_PROC_BIND=true
-
-# `module` and `conda activate` are not -e/-u clean: they routinely return
-# nonzero and reference unbound variables internally.  Relaxing the shell
-# options around them stops the job dying silently before srun.
-set +euo pipefail
-module load conda
-conda activate bout-data
-CONDA_RC=$?
-set -euo pipefail
-
-if [ "$CONDA_RC" -ne 0 ]; then
-    echo "Warning: 'conda activate bout-data' returned $CONDA_RC" >&2
+if [ ! -f "$BACKEND_SCRIPT" ]; then
+    echo "Error: $BACKEND_NAME not found in $SCRIPT_DIR" >&2
+    exit 1
 fi
 
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/global/cfs/projectdirs/m4491/ABOUND/local_libs/usr/netcdf-4.1.3/lib
-
-# Let `bout_save` import helper modules that live next to it, without
-# needing an installed package or a .py extension on the entry point.
-# export PYTHONPATH="$(dirname "$BOUT_SAVE_PY")${PYTHONPATH:+:$PYTHONPATH}"
-
-echo "Host:     $(hostname)"
-echo "Workdir:  $(pwd)"
-echo "Script:   $BOUT_SAVE_PY"
-echo "Python:   $(command -v python)"
-echo "Env:      ${CONDA_DEFAULT_ENV:-<none>}"
-echo "Args:     $*"
-echo "Started:  $(date)"
-echo
-
-# Sanity check: the job should be sitting in a BOUT++ data directory.
-if [ ! -f BOUT.inp ]; then
-    echo "Warning: no BOUT.inp in $(pwd) -- is this the right data directory?" >&2
+# Job name: bsave_<tail of data dir basename>
+MAX_SUFFIX_LEN=20
+BASE_NAME="$(basename "$DATA_DIR")"
+if [ "${#BASE_NAME}" -gt "$MAX_SUFFIX_LEN" ]; then
+    SUFFIX="${BASE_NAME: -${MAX_SUFFIX_LEN}}"
+    case "$SUFFIX" in
+        *_*) SUFFIX="${SUFFIX#*_}" ;;
+    esac
+else
+    SUFFIX="$BASE_NAME"
 fi
+SUFFIX="$(printf '%s' "$SUFFIX" | tr -c 'A-Za-z0-9._-' '_')"
+JOB_NAME="bsave_${SUFFIX}"
 
-# cwd IS the data directory (--chdir), so "." is the path argument.
-# "$@" carries the user's extra flags verbatim; the trailing "--" then "."
-# guarantees the positional is never swallowed by a greedy nargs list.
-srun -n 1 python "$BOUT_SAVE_PY" "$@" -- .
-RC=$?
+echo "Workdir:   $DATA_DIR"
+echo "QOS/time:  $SAVE_QOS / $SAVE_TIME   (up to $SAVE_TRIES attempts)"
 
-echo
-echo "Exit code: $RC"
-echo "Finished:  $(date)"
-exit $RC
+# Command-line --qos/--time override any #SBATCH -q/-t in the backend.
+PREV=""
+for i in $(seq 1 "$SAVE_TRIES"); do
+    if [ "$i" -eq 1 ]; then
+        DEP="$SAVE_AFTER"
+    else
+        DEP="afternotok${PREV}"
+    fi
+
+    JID=$(sbatch --parsable \
+                 --chdir="$DATA_DIR" \
+                 --job-name="${JOB_NAME}_${i}" \
+                 --qos="$SAVE_QOS" \
+                 --time="$SAVE_TIME" \
+                 ${DEP:+--dependency="$DEP" --kill-on-invalid-dep=yes} \
+                 --export=ALL,BOUT_SAVE_PY="$PY_SCRIPT" \
+                 "$BACKEND_SCRIPT" "$@")
+    JID="${JID%%;*}"
+    PREV="${PREV}:${JID}"
+
+    echo "Attempt $i: job $JID  ${DEP:+[$DEP]}"
+done

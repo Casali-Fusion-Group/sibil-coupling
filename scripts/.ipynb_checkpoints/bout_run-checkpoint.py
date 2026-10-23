@@ -148,7 +148,7 @@ def main() -> None:
     p.add_argument("--after", default="afterany",
                    choices=["afterok", "afterany", "any", "ok"],
                    help="Slurm dependency type for the first bout_save attempt.")
-    p.add_argument("--save-qos", default="debug",
+    p.add_argument("--save-qos", default="regular",
                    help="QOS for bout_save attempts (default: debug).")
     p.add_argument("--save-time", default="00:30:00",
                    help="Walltime per bout_save attempt (default: 00:30:00).")
