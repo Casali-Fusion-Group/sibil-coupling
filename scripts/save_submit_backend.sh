@@ -82,7 +82,10 @@ fi
 # "$@" carries the user's extra flags verbatim; the trailing "--" then "."
 # guarantees the positional is never swallowed by a greedy nargs list.
 RC=0
-srun -n 1 python -u "$BOUT_SAVE_PY" "$@" -- . || RC=$?
+# one process, SLURM_CPUS_PER_TASK cores: bout_save forks that many workers,
+# each collecting one variable (--workers defaults to SLURM_CPUS_PER_TASK)
+srun -n 1 -c "${SLURM_CPUS_PER_TASK:-1}" --cpu-bind=none \
+     python -u "$BOUT_SAVE_PY" "$@" -- . || RC=$?
 
 echo
 echo "Exit code: $RC"

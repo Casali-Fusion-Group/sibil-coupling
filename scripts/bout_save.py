@@ -50,7 +50,7 @@ import numpy as np
 from netCDF4 import Dataset
 
 from boutdata.collect import collect
-from boutdata.data import BoutData
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from boututils.datafile import DataFile
 
 HEAT_COEFF = 1.5      # 1.5 internal energy, 2.5 total enthalpy (Zhang 2019 uses 1.0)
@@ -497,26 +497,46 @@ def verify_gradient(numpy_dir, grid_fname, jomp=48, t=0):
 # collection
 # ===========================================================================
 
-def save_variable(data_dir, numpy_dir, key, time, cache, nt_expect=None):
-    ok, why = cache.status(key, nt_expect=nt_expect)
-    if ok:
-        print(f"  {key:<12} cached")
-        cache.record(key, np.load(Path(numpy_dir) / f"{key}.npy", mmap_mode="r"))
-        return
+def _collect_one(data_dir, numpy_dir, key, tmax, time):
+    """Worker: collect one variable, store 4-D fields as float32, write .npy."""
+    arr = collect(key, path=data_dir, info=False, tind=[0, tmax])
+    if time is not None and np.ndim(arr) == 4:
+        arr = arr[time, ...]
+    if np.ndim(arr) == 4 and arr.dtype == np.float64:
+        arr = arr.astype(np.float32)
+    np.save(Path(numpy_dir) / f"{key}.npy", arr)
+    return key, list(np.shape(arr)), str(arr.dtype)
 
-    print(f"  {key:<12} collecting   ({why})")
+
+def save_variables(data_dir, numpy_dir, keys, time, cache, nt_expect=None, workers=1):
+    """Collect every stale/absent key, `workers` variables at a time."""
     nt_min, nt_max = cache.fp["nt_min"], cache.fp["nt_max"]
     if nt_min != nt_max:
         print(f"    ! ragged dumps nt={nt_min}..{nt_max}; truncating to {nt_min}")
-    arr = collect(key, path=data_dir, info=False, tind=[0, nt_min - 1])
-
-    if time is not None and np.ndim(arr) == 4:
-        arr = arr[time, ...]
-
-    np.save(Path(numpy_dir) / f"{key}.npy", arr)
-    cache.record(key, arr)
+    todo = []
+    for key in keys:
+        ok, why = cache.status(key, nt_expect=nt_expect)
+        if ok:
+            print(f"  {key:<12} cached")
+            cache.record(key, np.load(Path(numpy_dir) / f"{key}.npy", mmap_mode="r"))
+        else:
+            print(f"  {key:<12} collecting   ({why})")
+            todo.append(key)
+    if not todo:
+        return
+    t0 = _time.time()
+    nw = max(1, min(workers, len(todo)))
+    print(f"  collecting {len(todo)} variables with {nw} worker(s)")
+    with ProcessPoolExecutor(max_workers=nw) as ex:
+        futs = [ex.submit(_collect_one, str(data_dir), str(numpy_dir), k, nt_min - 1, time)
+                for k in todo]
+        for f in as_completed(futs):
+            key, shape, dtype = f.result()
+            cache.man.setdefault("arrays", {})[key] = {
+                "shape": shape, "dtype": dtype,
+                "written": round(_time.time(), 3), "derived": False}
+            print(f"    {key:<12} done  {tuple(shape)}  ({_time.time() - t0:.0f}s)")
     cache.commit()
-    del arr
     gc.collect()
 
 
@@ -526,7 +546,7 @@ def save_variable(data_dir, numpy_dir, key, time, cache, nt_expect=None):
 
 def bout_save_data(data_dir, grid_fname, var_names, time, debug,
                    force=False, jomp=48, heat_coeff=HEAT_COEFF,
-                   check_inp=True):
+                   check_inp=True, workers=1):
 
     data_dir = str(data_dir)
     numpy_dir = Path(data_dir) / "numpy"
@@ -543,8 +563,8 @@ def bout_save_data(data_dir, grid_fname, var_names, time, debug,
           f"{'..' + str(fp['nt_max']) + ' (RAGGED)' if ragged else ''}"
           f"  -> expecting nt={nt_expect}\n")
 
-    d = BoutData(path=data_dir)
-    output_keys = list(d["outputs"].keys())
+    with Dataset(dump_files(data_dir)[0]) as ds:
+        output_keys = list(ds.variables.keys())
 
     def put(name, arr, derived=True):
         np.save(numpy_dir / f"{name}.npy", arr)
@@ -560,10 +580,8 @@ def bout_save_data(data_dir, grid_fname, var_names, time, debug,
     for key in keys_to_save:
         if key not in output_keys:
             print(f"  {key:<12} NOT IN DUMPS, skipping")
-            continue
-        save_variable(data_dir, numpy_dir, key, time, cache,
-                      nt_expect=nt_expect)
-    cache.commit()
+    save_variables(data_dir, numpy_dir, [k for k in keys_to_save if k in output_keys],
+                   time, cache, nt_expect=nt_expect, workers=workers)
 
     # -- 2. grid ------------------------------------------------------------
     with DataFile(grid_fname) as g:
@@ -836,10 +854,10 @@ def find_grid(data_dir):
 
 if __name__ == "__main__":
 
+    # only what the D/chi calculation and sibil_debug_diagnostics read
     default_vars = ["N0", "Ni", "Ti", "Ti0", "Te", "Te0", "Va",
-                    "U", "Phi", "Vexbx", "Vbtildx", "jpar",
+                    "Vexbx", "Vbtildx", "jpar",
                     "ddr_nitot", "ddr_Titot", "ddr_Tetot",
-                    "ddr_ni", "ddr_Ti", "ddr_Te",
                     "T_R", "T_M", "T_C", "T_G"]
 
     def flag(v):
@@ -856,6 +874,9 @@ if __name__ == "__main__":
                     help="re-collect everything regardless of provenance")
     ap.add_argument("-j", "--jomp", type=int, default=48)
     ap.add_argument("--heat-coeff", type=float, default=HEAT_COEFF)
+    ap.add_argument("-w", "--workers", type=int,
+                    default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)),
+                    help="variables collected in parallel (default: SLURM_CPUS_PER_TASK)")
     ap.add_argument("--audit", action="store_true",
                     help="report staleness of numpy/*.npy and exit")
     ap.add_argument("--purge", action="store_true",
@@ -879,7 +900,8 @@ if __name__ == "__main__":
 
     bout_save_data(args.path, str(find_grid(args.path)), args.vars, time,
                    args.debug, force=args.force, jomp=args.jomp,
-                   heat_coeff=args.heat_coeff, check_inp=check_inp)
+                   heat_coeff=args.heat_coeff, check_inp=check_inp,
+                   workers=args.workers)
 
     if args.clean:
         keep = {"Da.npy", "Da_t.npy", "Da_eff.npy",
@@ -893,7 +915,7 @@ if __name__ == "__main__":
                 "sqrt_g11.npy", "orthogonality.npy",
                 "ni_txy.npy", "Te_txy.npy", "Ti_txy.npy",
                 "dr_m.npy", "Ti0.npy", "Te0.npy", "N0.npy",
-                "U.npy", "Phi.npy",
+                "U.npy", "phi.npy",
                 "Ni.npy", "Te.npy", "Ti.npy",
                 "T_R.npy", "T_M.npy", "T_C.npy", "T_G.npy"}
         for fn in os.listdir(numpy_dir):
