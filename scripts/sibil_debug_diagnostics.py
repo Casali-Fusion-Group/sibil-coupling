@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-sibil_debug_diagnostics.py  (v4)
-================================
+sibil_debug_diagnostics.py  (v4.1)
+==================================
+
+v4.1: linear runs (nonlinear = false).  full_report() and make_debug_widget()
+detect them from BOUT.inp and switch to linear_report() / make_linear_widget():
+growth rate, local-gamma convergence, real frequency, eigenmode map, radial and
+poloidal structure, toroidal spectrum.  linear_scan_summary() gives gamma(n)
+across several linear runs.
 
 Drop-in diagnostic module for the SIBIL (SOLPS-ITER <-> elm_6f) interactive
 plotter notebook.
@@ -182,7 +188,65 @@ def _sep_line(ax, x=1.0):
     ax.axvline(x, color="k", lw=0.8, ls="--", alpha=0.6, zorder=0)
 
 
+TICK_FS, LABEL_FS, TITLE_FS, TITLE_WRAP = 9, 12, 15, 40
+
+
+def _split_title(txt):
+    """Two lines: break at a separator ('|', ',', ':', ';') near the middle if
+    there is one, else at the space nearest the middle.  Never inside $...$."""
+    import re
+    n = len(txt)
+    inmath = np.cumsum([c == "$" for c in txt]) % 2 == 1
+    best = None
+    for m in re.finditer(r"\s*\|\s*|(?<=[,:;])\s+", txt):
+        if not inmath[m.start()] and abs(m.start() - n / 2) < 0.3 * n:
+            if best is None or abs(m.start() - n / 2) < abs(best[0] - n / 2):
+                best = (m.start(), m.end())
+    if best is None:
+        sp = [i for i, c in enumerate(txt) if c == " " and not inmath[i]]
+        if not sp:
+            return txt
+        i = min(sp, key=lambda k: abs(k - n / 2))
+        best = (i, i + 1)
+    return txt[:best[0]].rstrip() + "\n" + txt[best[1]:].lstrip()
+
+
+def _wrap_title(txt):
+    if not txt or "\n" in txt or len(txt) <= TITLE_WRAP:
+        return txt
+    return _split_title(txt)
+
+
+def _style(fig):
+    """Uniform fonts on every axis of `fig`: ticks 9, axis labels 12, titles 15
+    (long titles split onto two lines).  Idempotent."""
+    if getattr(fig, "_sibil_styled", False):
+        return
+    for ax in fig.get_axes():
+        ax.tick_params(axis="both", which="both", labelsize=TICK_FS)
+        for off in (ax.xaxis.get_offset_text(), ax.yaxis.get_offset_text()):
+            off.set_fontsize(TICK_FS)
+        ax.xaxis.label.set_fontsize(LABEL_FS)
+        ax.yaxis.label.set_fontsize(LABEL_FS)
+        for loc in ("center", "left", "right"):
+            t = ax.get_title(loc=loc)
+            if t:
+                ax.set_title(_wrap_title(t), loc=loc, fontsize=TITLE_FS)
+    st = getattr(fig, "_suptitle", None)
+    if st is not None and st.get_text():
+        st.set_text(_wrap_title(st.get_text()))
+        st.set_fontsize(TITLE_FS)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
+    fig._sibil_styled = True
+
+
 def _save(fig, savedir, fname):
+    _style(fig)
     if savedir:
         os.makedirs(savedir, exist_ok=True)
         path = os.path.join(savedir, fname)
@@ -191,6 +255,7 @@ def _save(fig, savedir, fname):
 
 
 def _show(fig):
+    _style(fig)
     plt.show()
     plt.close(fig)
 
@@ -1361,6 +1426,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     a0.axvline(j, color="lime", lw=1.0)
     a0.set_xlabel("poloidal index (cyan = jomp, green = peak)")
     a0.set_ylabel(r"$\psi_n$",fontsize=12)
+    a0.tick_params(axis='both', which='major', labelsize=10)
     a0.set_title(f"envelope, t = {t}", fontsize=10)
 
     for jj_, c, lab in ((jomp, "c", f"j={jomp} (OMP)"), (j, "g", f"j={j} (peak)")):
@@ -1369,6 +1435,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     _sep_line(a1)
     a1.set_xlabel(r"$\psi_n$")
     a1.set_ylabel(f"|V_ExB| envelope [{unit}]",fontsize=12)
+    a1.tick_params(axis='both', which='major', labelsize=10)
     a1.set_title(f"radial envelope; peak/OMP = "
                  f"{_finite_max(env_t[:, j]) / (_finite_max(env_t[:, jomp]) + TINY):.1e}",
                  fontsize=10)
@@ -1384,6 +1451,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     a2.plot(x, smooth, color="C1", lw=1.4, label="1-2-1 smoothed (coherent)")
     a2.plot(x, resid, color="C3", lw=0.8, label=r"2$\Delta x$ residual")
     a2.set_yscale("symlog", linthresh=lt)
+    a2.tick_params(axis='both', which='major', labelsize=10)
     _sep_line(a2)
     if topo is not None and topo["leg_y"][j]:
         a2.axvline(_psi_at(x, topo["PF_limit_range"] * topo["ixsep"] - 0.5),
@@ -1410,6 +1478,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     a3.set_xlabel("time index")
     a3.set_ylabel(f"max envelope [{unit}]",fontsize=12)
     a3.set_title("V_ExB growth by region", fontsize=10)
+    a3.tick_params(axis='both', which='major', labelsize=10)
     a3.legend(fontsize=7)
     a3.grid(True, alpha=0.3, which="both")
 
@@ -1779,6 +1848,8 @@ def make_debug_widget(coeffs, psin, jomp=None, grid=None, data_dir=None,
     Profile widget: mask toggle, eps slider, log-y, 2dx overlay, psi zoom,
     sliders sized from the data (never from the config scalar `l`).
     """
+    if data_dir and is_linear_run(data_dir=data_dir, coeffs=coeffs):
+        return make_linear_widget(data_dir, psin, jomp=jomp, grid=grid, default_j=default_j)
     try:
         from ipywidgets import (interactive_output, IntSlider, FloatLogSlider,
                                 Checkbox, FloatRangeSlider, HBox, VBox, HTML, Output)
@@ -1820,12 +1891,24 @@ def make_debug_widget(coeffs, psin, jomp=None, grid=None, data_dir=None,
                              step=0.005, description="psi range:",
                              continuous_update=False, readout_format=".3f")
     err_out = Output()
+    nx = np.asarray(psin).shape[0]
+    try:
+        topo = load_topology(grid) if grid is not None else None
+    except Exception:
+        topo = None
+    ix0 = (topo["ixsep"] - 2) if topo else nx // 2
+    ix_sl = IntSlider(min=0, max=nx - 1, value=ix0, description="Rad. idx:",
+                      continuous_update=False)
+    pol_cb = Checkbox(value=True, description="poloidal")
 
-    def _plot(j, t, use_mask, logy, show_noise, eps, xr):
+    def _plot(j, t, use_mask, logy, show_noise, eps, xr, ix, pol):
         err_out.clear_output()
         try:
             plot_profiles_v2(coeffs, psin, j, t, use_mask=use_mask, logy=logy,
                              show_noise=show_noise, eps=eps, xlim=xr, jomp=jomp)
+            if pol:
+                plot_poloidal_profiles(coeffs, psin, ix, t, use_mask=use_mask, logy=logy,
+                                       eps=eps, jomp=jomp, topo=topo, j_mark=j)
         except Exception:
             import traceback
             with err_out:
@@ -1834,9 +1917,61 @@ def make_debug_widget(coeffs, psin, jomp=None, grid=None, data_dir=None,
 
     out = interactive_output(_plot, {"j": j_sl, "t": t_sl, "use_mask": mask_cb,
                                      "logy": log_cb, "show_noise": noise_cb,
-                                     "eps": eps_sl, "xr": xr_sl})
-    return VBox([hdr, HBox([j_sl, t_sl]), HBox([mask_cb, log_cb, noise_cb]),
-                 HBox([eps_sl, xr_sl]), out, err_out])
+                                     "eps": eps_sl, "xr": xr_sl, "ix": ix_sl,
+                                     "pol": pol_cb})
+    return VBox([hdr, HBox([j_sl, t_sl]), HBox([ix_sl, pol_cb]),
+                 HBox([mask_cb, log_cb, noise_cb]), HBox([eps_sl, xr_sl]), out, err_out])
+
+
+
+def plot_poloidal_profiles(coeffs, psin, ix, t=0, use_mask=True, logy=False,
+                           eps=MASK_EPS, jomp=None, topo=None, j_mark=None,
+                           savedir=None):
+    """Every (t, x, y) array in `coeffs` along the poloidal index at fixed
+    radial index `ix`, with X-point cuts, the outboard midplane and the radial
+    widget's poloidal index marked."""
+    x = np.asarray(psin)
+    keys = [k for k in coeffs if np.asarray(coeffs[k]).ndim == 3]
+    n = len(keys)
+    t = _tidx(t, _safe_nt(coeffs, keys))
+    fig, axs = plt.subplots(n, 1, figsize=(5.2, 1.35 * n), sharex=True)
+    axs = np.atleast_1d(axs)
+    for ax, name in zip(axs, keys):
+        a = np.asarray(coeffs[name], dtype=float)
+        tt = t
+        y_raw = a[tt, ix, :]
+        y = y_raw
+        if use_mask and name in DENOM_OF and DENOM_OF[name] in coeffs:
+            m = gradient_mask(np.asarray(coeffs[DENOM_OF[name]], dtype=float)[tt], eps)[ix, :]
+            y = np.where(m, y_raw, np.nan)
+            if (~m).any():
+                ax.plot(np.where(m, np.nan, np.abs(y_raw) if logy else y_raw), ":",
+                        color="0.6", lw=0.9)
+        ax.plot(np.abs(y) if logy else y, "o-", ms=2.5, lw=1.1,
+                color=COLORS.get(name, "k"))
+        if logy:
+            ax.set_yscale("log")
+        if topo is not None:
+            for c in _xpt_cuts(topo):
+                ax.axvline(c, color="k", ls="--", lw=0.7, alpha=0.7)
+        if jomp is not None:
+            ax.axvline(jomp, color="C2", lw=0.9, alpha=0.8)
+        if j_mark is not None:
+            ax.axvline(j_mark, color="C3", lw=0.9, alpha=0.6)
+        ax.set_ylabel(LABELS.get(name, name), fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(labelsize=7)
+        ax.yaxis.get_offset_text().set_fontsize(7)
+    axs[-1].set_xlabel("poloidal index", fontsize=12)
+    where = ""
+    if topo is not None:
+        where = "  core/PF" if ix < topo["ixsep"] else "  SOL"
+    fig.suptitle(f"rad idx {ix}  (psi_n {x[ix]:.4f}{where})   |   time idx {t}"
+                 "   |   green = jomp, red = radial-plot j, dashed = X-point cuts",
+                 fontsize=8, y=1.003)
+    _save(fig, savedir, f"poloidal_ix{ix}_t{t}.png")
+    _show(fig)
+    return fig
 
 
 def plot_profiles_v2(coeffs, psin, j, t=0, use_mask=True, logy=False,
@@ -2034,8 +2169,9 @@ def rhs_cost_trace(run_dir, log_names=("BOUT.log.0", "output"), savedir=None):
     mx = re.findall(r"At t=([\d.eE+-]+), mxstep", txt)
     fig, ax = plt.subplots(figsize=(7, 3.4))
     ax.semilogy(t, np.maximum(ev, 1), "o-", ms=3)
-    ax.set_xlabel(r"sim time [$\tau_A$]")
+    ax.set_xlabel(r"sim time [$\tau_A$]",fontsize=12)
     ax.set_ylabel("RHS evals per output",fontsize=12)
+    ax.tick_params(axis='both', which='major', labelsize=10)
     ax.grid(True, alpha=0.3, which="both")
     title = f"solver cost ({os.path.basename(path)})"
     if flag:
@@ -2208,6 +2344,328 @@ def _sep_kink_score(grid_or_path, topo, names=(("Niexp", "Ni0"), ("Teexp", "Te0"
 # =========================================================================== #
 # One-shot driver: only the CURRENT crash hypotheses + profile summary
 # =========================================================================== #
+
+# =========================================================================== #
+# LINEAR RUNS  (nonlinear = false)
+# --------------------------------------------------------------------------- #
+# elm_6f forces output_vradial / output_transfer / output_flux_par to false when
+# nonlinear = false, so there is no Vexb, ddr_*, T_* and therefore no D / chi.
+# What a linear run is for: the growth rate, frequency and eigenmode structure
+# of the toroidal harmonic kept by filter_z.  Everything below uses only the
+# evolved fields (Te, Ti, Ni, U, jpar, ...) that bout_save still collects.
+# =========================================================================== #
+LINEAR_FIELDS = ("Te", "Ti", "Ni", "U", "jpar", "phi", "Apar", "Vipar")
+
+
+def _read_inp(run_dir):
+    """Flat {key: value} from <run_dir>/BOUT.inp (lower-case keys, last wins)."""
+    out = {}
+    if not run_dir:
+        return out
+    p = os.path.join(run_dir, "BOUT.inp")
+    if not os.path.exists(p):
+        return out
+    for line in open(p, errors="ignore"):
+        line = line.split("#")[0].strip()
+        if "=" in line and not line.startswith("["):
+            k, v = line.split("=", 1)
+            out[k.strip().lower()] = v.strip().strip('"')
+    return out
+
+
+def _run_dir_of(data_dir):
+    if not data_dir:
+        return None
+    d = os.path.abspath(data_dir)
+    return os.path.dirname(d) if os.path.basename(d) == "numpy" else d
+
+
+def is_linear_run(run_dir=None, data_dir=None, coeffs=None):
+    """True if BOUT.inp says nonlinear = false, or (no BOUT.inp) there are no
+    transport coefficients and no ddr_* arrays to build them from."""
+    run_dir = run_dir or _run_dir_of(data_dir)
+    nl = _read_inp(run_dir).get("nonlinear")
+    if nl is not None:
+        return nl.lower() in ("false", "0", "no", "off")
+    no_coeffs = not coeffs or not any(k in coeffs for k in COEFF_KEYS)
+    no_ddr = bool(data_dir) and _find_npy(data_dir, "ddr_nitot") is None
+    return no_coeffs and no_ddr
+
+
+def _linear_setup(run_dir, data_dir):
+    inp = _read_inp(run_dir)
+    timestep = float(inp.get("timestep", 10.0))
+    zperiod = int(float(inp.get("zperiod", 1)))
+    n_tor = None
+    if inp.get("filter_z", "false").lower() == "true":
+        n_tor = int(float(inp.get("filter_z_mode", 1))) * zperiod
+    tau_a = None
+    vp = _find_npy(data_dir, "Va") if data_dir else None
+    if vp is not None:
+        va = float(np.asarray(np.load(vp)).ravel()[0])
+        tau_a = 1.0 / va                                   # Lbar = 1 m (rmag)
+    return dict(timestep=timestep, zperiod=zperiod, n_tor=n_tor, tau_a=tau_a)
+
+
+def _load_linear(data_dir, topo, fields=LINEAR_FIELDS, chunk=8, verbose=True):
+    red = {}
+    for v in fields:
+        r = _load_reduced(data_dir, v, topo["nx"], topo["ny"], chunk=chunk, verbose=False)
+        if r is not None:
+            red[v] = r
+    if verbose:
+        print("  fields: " + (", ".join(red) if red else "none found in " + str(data_dir)))
+    return red
+
+
+def _local_gamma(amp, timestep):
+    a = np.where(amp > 0, amp, np.nan)
+    return np.gradient(np.log(a)) / timestep
+
+
+def _mode_phase(data_dir, var, ix, iy, ny, harmonic):
+    """Phase of toroidal harmonic `harmonic` at (ix, iy) vs time, and the
+    toroidal power spectrum at the last output."""
+    path = _find_npy(data_dir, var)
+    a = np.load(path, mmap_mode="r")
+    if a.ndim != 4:
+        return None, None
+    yo = 2 if a.shape[2] == ny + 4 else 0
+    line = np.asarray(a[:, ix, iy + yo, :], dtype=float)
+    f = np.fft.rfft(line - line.mean(axis=1, keepdims=True), axis=1)
+    spec = np.abs(f[-1])
+    h = int(np.argmax(spec[1:]) + 1) if harmonic is None else harmonic
+    return np.unwrap(np.angle(f[:, h])), (spec, h)
+
+
+def linear_report(data_dir, grid_or_path, psin, topo=None, jomp=44, run_dir=None,
+                  field="Te", fit_frac=0.5, chunk=8, savedir=None, show=True):
+    """
+    Growth rate, real frequency and eigenmode structure of a linear run.
+
+      gamma   fitted to log(max rms_z field) over the last `fit_frac` of the run
+      local gamma(t) = d ln(amp)/dt -- must be flat for gamma to be meaningful
+      omega   from the phase of the dominant toroidal harmonic at the peak cell
+      mode    2-D rms map, radial profiles, poloidal envelope, toroidal spectrum
+
+    Writes linear_growth.png and linear_mode.png.  Returns a dict.
+    """
+    run_dir = run_dir or _run_dir_of(data_dir)
+    topo = topo or load_topology(grid_or_path)
+    x = np.asarray(psin)
+    cfg = _linear_setup(run_dir, data_dir)
+    dt = cfg["timestep"]
+    red = _load_linear(data_dir, topo, chunk=chunk)
+    if field not in red:
+        if not red:
+            print("  nothing to analyse")
+            return None
+        field = next(iter(red))
+    nt = red[field]["rms"].shape[0]
+    t = dt * np.arange(nt)
+    tfit = np.arange(int(nt * (1 - fit_frac)), nt)
+    regs = ["core", "SOL upstream", "leg SOL", "leg PF"]
+    visible = ~topo["blank"]
+
+    # ---- growth -----------------------------------------------------------
+    amps, gam = {}, {}
+    for v, r in red.items():
+        amps[v] = np.array([np.nanmax(np.where(visible, r["rms"][k], np.nan)) for k in range(nt)])
+        gam[v] = _fit_gamma(amps[v], dt, tfit)
+    lg = _local_gamma(amps[field], dt)
+    tail = lg[tfit][np.isfinite(lg[tfit])]
+    spread = (np.nanstd(tail) / abs(np.nanmean(tail))) if tail.size > 2 else np.nan
+
+    # ---- eigenmode location & frequency -------------------------------------
+    last = np.where(visible, red[field]["rms"][-1], np.nan)
+    ix, iy = np.unravel_index(np.nanargmax(last), last.shape)
+    harm = None if cfg["n_tor"] is None else cfg["n_tor"] // max(cfg["zperiod"], 1)
+    phase, spec = _mode_phase(data_dir, field, ix, iy, topo["ny"], harm)
+    omega = np.polyfit(t[tfit], phase[tfit], 1)[0] if phase is not None else np.nan
+    n_seen = spec[1] * cfg["zperiod"] if spec is not None else None
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+    for v in red:
+        axs[0].semilogy(np.arange(nt), amps[v], "o-", ms=3,
+                        label=f"{v}  ({gam[v]:+.4f})")
+    axs[0].set_title(r"max rms$_z$ over the plane  ($\gamma\,\tau_A$ fitted)", fontsize=9)
+    axs[0].set_ylabel("max rms_z", fontsize=12)
+    axs[0].legend(fontsize=7)
+    for rg in regs:
+        m = (topo["region"] == rg) & visible
+        if m.any():
+            tr = np.array([np.nanmax(red[field]["rms"][k][m]) for k in range(nt)])
+            axs[1].semilogy(np.arange(nt), tr, "o-", ms=3, color=REGION_COLORS[rg],
+                            label=f"{rg}  ({_fit_gamma(tr, dt, tfit):+.4f})")
+    axs[1].set_title(f"{field} by region", fontsize=9)
+    axs[1].legend(fontsize=7, title=r"region ($\gamma\,\tau_A$)", title_fontsize=7)
+    axs[2].plot(np.arange(nt), lg, "o-", ms=3, color="k", label=r"local $\gamma$")
+    axs[2].axhline(gam[field], color="C3", ls="--", label=f"fit {gam[field]:+.4f}")
+    axs[2].axvspan(tfit[0], tfit[-1], color="C3", alpha=0.08)
+    axs[2].set_title(r"local $\gamma(t) = d\ln A/dt$  (flat = converged eigenmode)", fontsize=9)
+    axs[2].set_ylabel(r"$\gamma\,\tau_A$", fontsize=12)
+    axs[2].legend(fontsize=7)
+    axs[2].ticklabel_format(axis="y", useOffset=False)
+    if np.isfinite(gam[field]) and gam[field] != 0:
+        g0 = abs(gam[field])
+        axs[2].set_ylim(min(0.0, np.nanmin(lg[1:])) - 0.1 * g0, max(2 * g0, np.nanmax(lg[1:]) + 0.1 * g0))
+    for a in axs:
+        a.set_xlabel("time index")
+        a.grid(True, alpha=0.3, which="both")
+    fig.tight_layout()
+    _save(fig, savedir, "linear_growth.png")
+    _show(fig) if show else plt.close(fig)
+
+    # ---- eigenmode structure -----------------------------------------------
+    fig, axs = plt.subplots(1, 4, figsize=(19, 4.2))
+    z = _log10abs(last / np.nanmax(last), floor_decades=6)
+    pc = axs[0].pcolormesh(np.arange(topo["ny"]), x, z, cmap="inferno", shading="nearest",
+                           vmin=-6, vmax=0)
+    fig.colorbar(pc, ax=axs[0], pad=0.01, label="log10 rms / max")
+    _overlay_topology(axs[0], topo, x)
+    axs[0].plot(iy, x[ix], "c+", ms=12, mew=2)
+    axs[0].set_xlabel("poloidal index"); axs[0].set_ylabel(r"$\psi_n$", fontsize=12)
+    axs[0].set_title(f"{field} eigenmode, last output", fontsize=9)
+    for v in red:
+        r = red[v]["rms"][-1]
+        axs[1].semilogy(x, r[:, iy] / (np.nanmax(r[:, iy]) + TINY), label=f"{v} @ j={iy}")
+    r = red[field]["rms"][-1][:, jomp]
+    axs[1].semilogy(x, r / (np.nanmax(r) + TINY), "k--", label=f"{field} @ jomp={jomp}")
+    _sep_line(axs[1])
+    axs[1].set_ylim(1e-4, 2)
+    axs[1].set_xlabel(r"$\psi_n$", fontsize=12)
+    axs[1].set_title("radial structure (normalised)", fontsize=9)
+    axs[1].legend(fontsize=7)
+    env = red[field]["rms"][-1][ix, :]
+    axs[2].semilogy(np.arange(topo["ny"]), env / (np.nanmax(env) + TINY), "o-", ms=3)
+    for c in _xpt_cuts(topo):
+        axs[2].axvline(c, color="k", ls="--", lw=0.8)
+    axs[2].axvline(jomp, color="C2", lw=1, label="jomp")
+    axs[2].set_xlabel("poloidal index")
+    axs[2].set_title(rf"poloidal envelope on $\psi_n$={x[ix]:.4f} (ballooning check)", fontsize=9)
+    axs[2].legend(fontsize=7)
+    if spec is not None:
+        sp, h = spec
+        axs[3].bar(np.arange(sp.size) * cfg["zperiod"], sp / (sp.max() + TINY),
+                   width=0.8 * cfg["zperiod"])
+        axs[3].set_yscale("log"); axs[3].set_ylim(1e-8, 2)
+        axs[3].set_xlabel("toroidal mode number n")
+        axs[3].set_title(f"toroidal spectrum at peak cell (dominant n = {h * cfg['zperiod']})",
+                         fontsize=9)
+    for a in axs[1:]:
+        a.grid(True, alpha=0.3, which="both")
+    fig.tight_layout()
+    _save(fig, savedir, "linear_mode.png")
+    _show(fig) if show else plt.close(fig)
+
+    # ---- text -------------------------------------------------------------
+    n_lab = cfg["n_tor"] if cfg["n_tor"] is not None else n_seen
+    print(f"  toroidal mode n = {n_lab}"
+          + ("" if cfg["n_tor"] is None or n_seen == cfg["n_tor"]
+             else f"   (!! spectrum peaks at n = {n_seen}, filter_z keeps n = {cfg['n_tor']})"))
+    print(f"  fit window: outputs {tfit[0]}..{tfit[-1]}  ({t[tfit[0]]:.0f}-{t[tfit[-1]]:.0f} tau_A)")
+    for v in red:
+        s_ = f"   = {gam[v] / cfg['tau_a']:.3e} 1/s" if cfg["tau_a"] else ""
+        print(f"  gamma[{v:<5}] = {gam[v]:+.5f} / tau_A{s_}")
+    print(f"  local-gamma spread in fit window: {spread:.1%}"
+          + ("   (converged)" if spread < 0.1 else "   (NOT converged -- run longer)"))
+    if np.isfinite(omega):
+        print(f"  omega = {omega:+.5f} rad/tau_A   omega/gamma = "
+              f"{omega / gam[field] if gam[field] else np.nan:+.2f}"
+              "   (|omega/gamma| << 1 ideal-ballooning-like; >~ 1 drift/resistive-drift)")
+    print(f"  mode peak: psi_n {x[ix]:.4f} (ix={ix}), iy={iy} [{topo['region'][ix, iy]}], "
+          f"jomp={jomp}")
+    return dict(n=n_lab, gamma=gam, gamma_field=gam[field], spread=spread, omega=omega,
+                peak=(int(ix), int(iy)), region=topo["region"][ix, iy], cfg=cfg)
+
+
+def linear_scan_summary(run_dirs, grid_or_path, psin, jomp=44, field="Te",
+                        data_subdir="numpy", savedir=None):
+    """gamma(n) and omega(n) across several linear runs (e.g. r10.4-r10.6)."""
+    topo = load_topology(grid_or_path)
+    rows = []
+    for rd in run_dirs:
+        dd = os.path.join(rd, data_subdir)
+        print(f"\n--- {os.path.basename(os.path.normpath(rd))}")
+        r = linear_report(dd, grid_or_path, psin, topo=topo, jomp=jomp, run_dir=rd,
+                          field=field, show=False)
+        if r is not None and r["n"] is not None:
+            rows.append((r["n"], r["gamma_field"], r["omega"], r["spread"],
+                         os.path.basename(os.path.normpath(rd))))
+    if not rows:
+        return None
+    rows.sort()
+    n, g, w, sp, names = zip(*rows)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(n, g, "o-", label=r"$\gamma\,\tau_A$")
+    ax.plot(n, np.abs(w), "s--", label=r"$|\omega|\,\tau_A$")
+    for ni, gi, s_ in zip(n, g, sp):
+        if not s_ < 0.1:
+            ax.annotate("not converged", (ni, gi), fontsize=7, color="C3")
+    ax.set_xlabel("toroidal mode number n")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+    ax.set_title("linear spectrum", fontsize=10)
+    fig.tight_layout()
+    _save(fig, savedir, "linear_spectrum.png")
+    _show(fig)
+    print("\n  n     gamma*tauA   omega*tauA   converged   run")
+    for row in rows:
+        print(f"  {row[0]:<5} {row[1]:+11.5f} {row[2]:+12.5f}   {'yes' if row[3] < 0.1 else 'NO':>8}   {row[4]}")
+    return rows
+
+
+def make_linear_widget(data_dir, psin, jomp=None, grid=None, default_j=44):
+    """Widget for linear runs: radial rms profiles of every evolved field at
+    (j, t) and the growth trace with the selected time marked."""
+    from ipywidgets import interactive_output, IntSlider, Checkbox, HBox, VBox, HTML
+    run_dir = _run_dir_of(data_dir)
+    if grid is None:
+        raise ValueError("make_linear_widget needs grid=")
+    topo = load_topology(grid)
+    red = _load_linear(data_dir, topo)
+    if not red:
+        raise FileNotFoundError(f"no evolved-field .npy in {data_dir}")
+    cfg = _linear_setup(run_dir, data_dir)
+    x = np.asarray(psin)
+    nt = next(iter(red.values()))["rms"].shape[0]
+    visible = ~topo["blank"]
+    amps = {v: np.array([np.nanmax(np.where(visible, r["rms"][k], np.nan))
+                         for k in range(nt)]) for v, r in red.items()}
+    hdr = HTML(value=f"<div style='font-family:monospace;font-size:11px'><b>LINEAR RUN</b>"
+                     f" &nbsp; n = {cfg['n_tor']} &nbsp; nt = {nt} &nbsp; "
+                     f"timestep = {cfg['timestep']} tau_A &nbsp; (no D/chi: "
+                     f"nonlinear = false disables output_vradial)</div>")
+    j_sl = IntSlider(min=0, max=topo["ny"] - 1, value=min(default_j, topo["ny"] - 1),
+                     description="Pol. idx:", continuous_update=False)
+    t_sl = IntSlider(min=0, max=nt - 1, value=nt - 1, description="Time idx:",
+                     continuous_update=False)
+    norm_cb = Checkbox(value=True, description="normalise")
+
+    def _plot(j, t, norm):
+        fig, (a0, a1) = plt.subplots(1, 2, figsize=(12, 4))
+        for v, r in red.items():
+            y = r["rms"][t][:, j]
+            a0.semilogy(x, y / (np.nanmax(y) + TINY) if norm else y, label=v)
+        _sep_line(a0)
+        a0.set_xlabel(r"$\psi_n$", fontsize=12)
+        a0.set_title(f"rms_z at j={j}, t={t}" + (" (normalised)" if norm else ""), fontsize=9)
+        a0.legend(fontsize=7)
+        for v in red:
+            a1.semilogy(np.arange(nt), amps[v], "o-", ms=3, label=v)
+        a1.axvline(t, color="k", lw=0.8)
+        a1.set_xlabel("time index")
+        a1.set_title("max rms_z over the plane", fontsize=9)
+        a1.legend(fontsize=7)
+        for a in (a0, a1):
+            a.grid(True, alpha=0.3, which="both")
+        _style(fig)
+        plt.show()
+
+    out = interactive_output(_plot, {"j": j_sl, "t": t_sl, "norm": norm_cb})
+    return VBox([hdr, HBox([j_sl, t_sl, norm_cb]), out])
+
+
 class _Tee:
     """Write to the notebook/terminal AND a report file."""
     def __init__(self, *streams):
@@ -2288,6 +2746,23 @@ def _full_report(run_dir, grid_or_path, coeffs=None, psin=None, jomp=44,
     if data_dir is None and run_dir:
         cand = os.path.join(run_dir, "numpy")
         data_dir = cand if os.path.isdir(cand) else run_dir
+    if is_linear_run(run_dir, data_dir, coeffs):
+        head("LINEAR RUN (nonlinear = false): growth rate, frequency, eigenmode")
+        print("  elm_6f disables output_vradial/output_transfer/output_flux_par when\n"
+              "  nonlinear = false -> no Vexb, ddr_*, T_* and no D/chi.  Transport\n"
+              "  sections skipped.")
+        res = linear_report(data_dir, grid_or_path, x, topo=topo, jomp=jomp,
+                            run_dir=run_dir, chunk=chunk, savedir=savedir)
+        cost = rhs_cost_trace(run_dir, savedir=savedir) if run_dir else None
+        head("VERDICT")
+        if res is not None:
+            print(f"  n = {res['n']}   gamma = {res['gamma_field']:+.5f} / tau_A   "
+                  f"omega = {res['omega']:+.5f} / tau_A   "
+                  f"{'converged' if res['spread'] < 0.1 else 'NOT converged'}   "
+                  f"peak in {res['region']}")
+        print("\nAll figures written to:", os.path.abspath(savedir))
+        return topo, res
+
     red = {}
     head("LOADING .npy from " + (os.path.abspath(data_dir) if data_dir else "<no data_dir>"))
     for v in ("Te", "Ti", "Ni"):
