@@ -18,6 +18,7 @@
 #   SAVE_QOS     QOS for every attempt         (default: premium)
 #   SAVE_TIME    walltime for every attempt    (default: 00:30:00)
 #   SAVE_TRIES   number of attempts            (default: 3)
+#   SAVE_PAYLOAD script to run, e.g. hermes_save (default: bout_save)
 #   SAVE_CPUS    cores = variables collected in parallel (default: 16)
 #
 # Usage:   bout_save_submit.sh [DATA_DIR] [bout_save args...]
@@ -25,7 +26,7 @@
 
 set -euo pipefail
 
-PAYLOAD_NAME="bout_save"
+PAYLOAD_NAME="${SAVE_PAYLOAD:-bout_save}"
 BACKEND_NAME="save_submit_backend.sh"
 
 SAVE_AFTER="${SAVE_AFTER:-}"

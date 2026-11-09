@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+"""
+hermes_save -- turbulent cross-field transport coefficients from a Hermes-2 /
+Hermes-3 run, written to <run>/numpy/ under BOTH naming conventions:
+
+  bout_save / sibil_debug_diagnostics names
+      Da_t, Xe_t, Xi_t, Gamma_txy, qe_txy, qi_txy, ni_txy, Te_txy, Ti_txy,
+      ddr_*tot_txy, Vexbx_txy, Da/Xe/Xi (+ _eff), Ni.npy/Te.npy/Ti.npy (4-D)
+  turbulent_exb_flux.py names
+      Gamma_ExB, Gamma_dia, q_ExB, q_dia, D_ExB, D_dia, D_total,
+      chi_ExB, chi_dia, chi_total, cross_phase
+
+Physics (same as turbulent_exb_flux.py, in SI with the grid's physical R, Bp, dx):
+    v_E,r   = (1/(R Bp)) d(phi Tnorm)/dz              [= sqrt(g33-g13^2/g11)/B dphi/dz]
+    v_dia,r = -(1/(R Bp)) (1/<n>) d(p_e)/dz          (electron, q_e = -e)
+    Gamma_X = < n~ v_X,r >_z
+    q_X     = 5/2 < p_e~ v_X,r >_z      (ion: 5/2 < p_i~ v_E,r >_z)
+    D_X     = -Gamma_X / d<n>/dr
+    chi_X   = -q_X / ( <n> d<T>/dr )
+    d/dr    = R Bp d/dx                (grid dx, psi per cell)
+    d/dz    spectral, k = 2 pi m / L_z,  L_z = mean(dz) * nz
+Da_t = D_ExB, Xe_t = chi_ExB (electron), Xi_t = chi_ExB (ion).  D_total = D_ExB + D_dia.
+
+Reading: every BOUT.dmp.*.nc is opened ONCE, in parallel (-w workers, default
+SLURM_CPUS_PER_TASK), and all fluxes are reduced over z inside the worker, so the
+4-D fields never have to be assembled in memory.  HDF5 file locking is switched
+off (NERSC CFS); a dump file that still cannot be opened is named in the error.
+
+Usage:  hermes_save [run_dir] [--grid G] [-w N] [--chunk 16] [--flip-vr]
+                    [--x-guards N] [--fields] [--ion d+] [--skip-bad]
+                    [--live] [--retries 4] [--retry-wait 5] [--t-end N]
+
+Running simulation:  hermes_save . --live   reads only the records that are complete
+in every dump file (minus the newest, which may be mid-write) and retries any file
+caught mid-write.  Rerun it any time to pick up the new outputs.
+"""
+import os
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
+import re                                                  # noqa: E402
+import json                                                # noqa: E402
+import time                                                # noqa: E402
+import argparse                                            # noqa: E402
+from pathlib import Path                                   # noqa: E402
+
+import numpy as np                                         # noqa: E402
+from netCDF4 import Dataset                                # noqa: E402
+
+REL_EPS = 1.0e-3
+
+
+def find_grid(data_dir):
+    inp = Path(data_dir) / "BOUT.inp"
+    section = ""
+    for line in open(inp):
+        s = line.split("#")[0].strip()
+        if s.startswith("["):
+            section = s.strip("[] ").lower()
+            continue
+        if "=" not in s:
+            continue
+        k, v = (x.strip() for x in s.split("=", 1))
+        if (section == "" and k.lower() == "grid") or (section == "mesh" and k.lower() == "file"):
+            p = Path(os.path.expandvars(v.strip('"').strip("'")))
+            return p if p.is_absolute() or not (Path(data_dir) / p).exists() else Path(data_dir) / p
+    raise RuntimeError(f"no grid file in {inp}; pass --grid")
+
+
+def dump_files(data_dir):
+    f = list(Path(data_dir).glob("BOUT.dmp.*.nc"))
+    return sorted(f, key=lambda p: int(re.findall(r"\.(\d+)\.nc$", p.name)[0]))
+
+
+def detect(keys, ion=None):
+    ks = set(keys)
+    m = {"n": "Ne", "phi": "phi"}
+    m["Te"] = "Te" if "Te" in ks else ("Pe", "Ne")
+    m["Pe"] = "Pe" if "Pe" in ks else ("Ne", "Te")              # product
+    ions = [k[1:] for k in ks if k.startswith("N") and k.endswith("+") and "P" + k[1:] in ks]
+    if ion:
+        ions = [ion]
+    if ions:
+        i = sorted(ions)[0]
+        m["Ti"] = "T" + i if "T" + i in ks else ("P" + i, "N" + i)
+        m["Pi"] = "P" + i
+    elif "Pi" in ks:
+        m["Ti"] = ("Pi", "Ne")
+        m["Pi"] = "Pi"
+    missing = [v for v in ("Ne", "phi") if v not in ks]
+    if missing:
+        raise KeyError(f"missing {missing} in the dumps; have {sorted(ks)[:40]}")
+    return m
+
+
+def _sc(ds, name, default=None):
+    if name in ds.variables:
+        return float(np.asarray(ds[name][:]).ravel()[0])
+    if default is None:
+        raise KeyError(name)
+    return default
+
+
+def ddz(f, Lz):
+    nz = f.shape[-1]
+    k = (2.0 * np.pi / Lz) * np.fft.rfftfreq(nz, d=1.0 / nz)
+    return np.fft.irfft(np.fft.rfft(f, axis=-1) * (1j * k), n=nz, axis=-1)
+
+
+def _retry(fn, tries=1, wait=10.0):
+    """Call fn(); on a read error (file mid-write by a running simulation) wait and retry."""
+    for k in range(tries):
+        try:
+            return fn()
+        except (OSError, RuntimeError, KeyError, IndexError):
+            if k == tries - 1:
+                raise
+            time.sleep(wait * (1 + k))
+
+
+def _create_npy(path, shape, dtype="<f4"):
+    """Empty .npy of `shape` written with plain file I/O (CFS has no writable mmap).
+    Returns (path, data offset, shape) for _write_block."""
+    from numpy.lib import format as fmt
+    with open(path, "wb") as fh:
+        fmt.write_array_header_1_0(fh, {"descr": fmt.dtype_to_descr(np.dtype(dtype)),
+                                        "fortran_order": False, "shape": tuple(shape)})
+        off = fh.tell()
+        fh.truncate(off + int(np.prod(shape)) * np.dtype(dtype).itemsize)
+    return str(path), off, tuple(shape)
+
+
+def _write_block(spec, tsl, xs, ys, arr):
+    """Write arr (t, x, y, z) into the (tsl, xs, ys, :) block of a C-order .npy with pwrite:
+    for fixed (t, x) the (y, z) slab is contiguous on disk."""
+    path, off, (nt, nx, ny, nz) = spec
+    item = arr.dtype.itemsize
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        for it, t in enumerate(range(tsl.start, tsl.stop)):
+            for ix, x in enumerate(range(xs.start, xs.stop)):
+                pos = off + (((t * nx + x) * ny + ys.start) * nz) * item
+                os.pwrite(fd, np.ascontiguousarray(arr[it, ix]).tobytes(), pos)
+    finally:
+        os.close(fd)
+
+
+def _nrec(f):
+    """Complete records in one dump file: the t dimension (metadata only), plus a read of
+    the last t_array entry to make sure that record is readable."""
+    with Dataset(f) as ds:
+        n_ = ds.dimensions["t"].size if "t" in ds.dimensions else len(ds["t_array"][:])
+        np.asarray(ds["t_array"][n_ - 1])
+        return n_
+
+
+def _nrec_retry(f, tries=1, wait=5.0):
+    return _retry(lambda: _nrec(f), tries, wait)
+
+
+def _block_retry(path, m, Nnorm, Tnorm, RBp_g, nt, chunk, flip, fields, tries=1, wait=10.0):
+    return _retry(lambda: _block(path, m, Nnorm, Tnorm, RBp_g, nt, chunk, flip, fields),
+                  tries, wait)
+
+
+def _block(path, m, Nnorm, Tnorm, RBp_g, nt, chunk, flip, fields):
+    """Read one dump file, reduce over z.  Returns global slices + (t, xl, yl) arrays."""
+    with Dataset(path) as ds:
+        MXSUB, MYSUB = int(_sc(ds, "MXSUB")), int(_sc(ds, "MYSUB"))
+        MXG, MYG = int(_sc(ds, "MXG", 2)), int(_sc(ds, "MYG", 2))
+        NXPE = int(_sc(ds, "NXPE"))
+        px, py = int(_sc(ds, "PE_XIND")), int(_sc(ds, "PE_YIND"))
+        lo = 0 if px == 0 else MXG
+        hi = MXG + MXSUB + (MXG if px == NXPE - 1 else 0)
+        gx0 = px * MXSUB + lo
+        xs_l, ys_l = slice(lo, hi), slice(MYG, MYG + MYSUB)
+        xs_g = slice(gx0, gx0 + hi - lo)
+        ys_g = slice(py * MYSUB, (py + 1) * MYSUB)
+        RBp = RBp_g[xs_g, ys_g][None, :, :, None]
+        dz = np.asarray(ds["dz"][:], dtype=float) if "dz" in ds.variables else None
+
+        def rd(v, sl):
+            return np.asarray(ds[v][sl, xs_l, ys_l, :], dtype=float)
+
+        def get(spec, sl, product=False):
+            if isinstance(spec, str):
+                return rd(spec, sl)
+            a, b = rd(spec[0], sl), rd(spec[1], sl)
+            if product:
+                return a * b
+            return a / np.where(b == 0, np.nan, b)
+
+        nz = ds[m["n"]].shape[-1]
+        if dz is None:
+            Lz = 2.0 * np.pi
+        else:
+            Lz = float(np.mean(dz[xs_l, ys_l] if dz.ndim == 2 else dz)) * nz
+        sgn = -1.0 if flip else 1.0
+        keys = ("n", "Te", "Ti", "pe", "G_E", "G_D", "qe_E", "qe_D", "qi_E", "vr", "cp")
+        out = {k: [] for k in keys}
+        for t0 in range(0, nt, chunk):
+            sl = slice(t0, min(nt, t0 + chunk))
+            n = rd(m["n"], sl) * Nnorm
+            te = get(m["Te"], sl) * Tnorm
+            pe = get(m["Pe"], sl, product=True) * Nnorm * Tnorm        # eV m^-3
+            dphi = ddz(rd(m["phi"], sl) * Tnorm, Lz)
+            vE = sgn * dphi / RBp
+            nb, peb = n.mean(-1, keepdims=True), pe.mean(-1, keepdims=True)
+            nf, pef = n - nb, pe - peb
+            vD = -sgn * ddz(pef, Lz) / (np.where(nb == 0, np.nan, nb) * RBp)
+            out["n"].append(nb[..., 0])
+            out["Te"].append(te.mean(-1))
+            out["pe"].append(peb[..., 0])
+            out["G_E"].append((nf * vE).mean(-1))
+            out["G_D"].append((nf * vD).mean(-1))
+            out["qe_E"].append(2.5 * (pef * vE).mean(-1))
+            out["qe_D"].append(2.5 * (pef * vD).mean(-1))
+            out["vr"].append(vE.std(-1))
+            den = np.sqrt((nf ** 2).mean(-1) * (dphi ** 2).mean(-1))
+            out["cp"].append(np.where(den > 0, (nf * dphi).mean(-1) / np.where(den > 0, den, 1), 0.0))
+            ti = None
+            if "Ti" in m:
+                ti = get(m["Ti"], sl) * Tnorm
+                pi = rd(m["Pi"], sl) * Nnorm * Tnorm if "Pi" in m else n * ti
+                pif = pi - pi.mean(-1, keepdims=True)
+                out["Ti"].append(ti.mean(-1))
+                out["qi_E"].append(2.5 * (pif * vE).mean(-1))
+            for name, arr, norm in (("Ni", n, 1e20), ("Te", te, 1.0), ("Ti", ti, 1.0)):
+                if arr is None:
+                    continue
+                a32 = (arr / norm).astype("<f4")          # 1e20 m^-3, eV (grid Niexp/Teexp units)
+                mu = a32.mean(-1)
+                for k, v in (("min", a32.min(-1)), ("max", a32.max(-1)), ("mean", mu),
+                             ("rms", np.sqrt(((a32 - mu[..., None]) ** 2).mean(-1)))):
+                    out.setdefault(f"{name}_{k}", []).append(v)
+                if fields and name in fields:
+                    _write_block(fields[name], sl, xs_g, ys_g, a32)
+            del n, te, pe, dphi, vE, vD, nf, pef, ti
+    return xs_g, ys_g, {k: np.concatenate(v) for k, v in out.items() if v}
+
+
+def run(data_dir, grid, chunk=16, flip=False, save_fields=True, ion=None, workers=1,
+        x_guards=0, skip_bad=False, live=False, tries=None, wait=5.0, t_end=None):
+    t_start = time.time()
+    data_dir = Path(data_dir)
+    nd = data_dir / "numpy"
+    nd.mkdir(exist_ok=True)
+    files = dump_files(data_dir)
+    if not files:
+        raise FileNotFoundError(f"no BOUT.dmp.*.nc in {data_dir}")
+
+    tries = tries or (4 if live else 1)
+    if live:
+        print(f"live mode: reading a running simulation -- only records complete in every "
+              f"file are used; unreadable files are retried {tries}x", flush=True)
+
+    nw = max(1, min(workers, len(files)))
+    print(f"checking {len(files)} dump files with {nw} worker(s)", flush=True)
+    nts, bad = [], []
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    t_chk = time.time()
+    with ProcessPoolExecutor(max_workers=nw) as ex:
+        futs = {ex.submit(_nrec_retry, str(f), tries, wait): f for f in files}
+        for i, fu in enumerate(as_completed(futs), 1):
+            f = futs[fu]
+            try:
+                nts.append(fu.result())
+            except Exception as e:                              # OSError / RuntimeError (HDF)
+                bad.append((f, f"{type(e).__name__}: {e}"))
+            if i % max(1, len(files) // 8) == 0 or i == len(files):
+                print(f"  checked {i}/{len(files)}  ({time.time() - t_chk:.0f}s)", flush=True)
+    if bad:
+        print(f"! {len(bad)} unreadable dump file(s):")
+        for f, e in bad:
+            print(f"    {f.name:<20} {e}")
+        print("  -> if the Hermes run is still running, wait for it (or submit with\n"
+              "     SAVE_AFTER=afterany:<hermes_jobid>); if it has finished these files are\n"
+              "     damaged (check: ncdump -h <file>).", flush=True)
+        if not skip_bad:
+            raise SystemExit("  rerun with --skip-bad to leave those blocks as NaN")
+        files = [f for f in files if f not in {b[0] for b in bad}]
+        print(f"  --skip-bad: continuing with {len(files)} files; their (x, y) blocks are NaN")
+    nt = min(nts)
+    if live and nt > 1:
+        nt -= 1                     # the newest record may still be half-written
+    if t_end is not None:
+        nt = min(nt, int(t_end))
+    if min(nts) != max(nts):
+        print(f"! ragged dumps nt={min(nts)}..{max(nts)} (run still writing?) -- using {nt}")
+
+    with Dataset(files[0]) as ds:
+        keys = list(ds.variables)
+        m = detect(keys, ion)
+        Nnorm, Tnorm = _sc(ds, "Nnorm"), _sc(ds, "Tnorm")
+        Om = _sc(ds, "Omega_ci", 1.0)
+        t_arr = np.asarray(ds["t_array"][:nt], dtype=float)
+        nz = ds[m["n"]].shape[-1]
+        NXPE, NYPE = int(_sc(ds, "NXPE")), int(_sc(ds, "NYPE"))
+        MXSUB, MYSUB, MXG = int(_sc(ds, "MXSUB")), int(_sc(ds, "MYSUB")), int(_sc(ds, "MXG", 2))
+    print("variables: " + ", ".join(f"{k} <- {v if isinstance(v, str) else '/'.join(v)}"
+                                    for k, v in m.items()), flush=True)
+    print(f"Nnorm = {Nnorm:.3e} m^-3   Tnorm = {Tnorm:g} eV   Omega_ci = {Om:.3e} 1/s", flush=True)
+    nx, ny = NXPE * MXSUB + 2 * MXG, NYPE * MYSUB
+    print(f"{len(files)} dump files ({NXPE} x {NYPE}), global (nt, nx, ny, nz) = "
+          f"({nt}, {nx}, {ny}, {nz})", flush=True)
+
+    with Dataset(grid) as g:
+        back = {v: np.asarray(g[k][:], dtype=np.float32) for v, k in
+                (("Ni", "Niexp"), ("Te", "Teexp"), ("Ti", "Tiexp")) if k in g.variables}
+        if "Ni" in back and np.nanmax(back["Ni"]) > 1e10:
+            back["Ni"] /= 1e20
+        R = np.asarray(g["Rxy"][:], dtype=float)
+        Bp = np.abs(np.asarray(g["Bpxy"][:], dtype=float))
+        dx = np.asarray(g["dx"][:], dtype=float)
+    if R.shape != (nx, ny):
+        raise SystemExit(f"grid {grid} is {R.shape}, dumps are ({nx}, {ny})")
+    if dx.ndim == 1:
+        dx = dx[:, None] * np.ones_like(R)
+    RBp = R * Bp
+    np.save(nd / "t_array.npy", t_arr / Om)
+
+    fields = {}
+    if save_fields:
+        for name in ("Ni", "Te") + (("Ti",) if "Ti" in m else ()):
+            p = nd / f"{name}.npy"
+            fields[name] = _create_npy(p, (nt, nx, ny, nz))
+
+    G = {}
+    nw = max(1, min(workers, len(files)))
+    print(f"reading {len(files)} files with {nw} worker(s)", flush=True)
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    done = 0
+    with ProcessPoolExecutor(max_workers=nw) as ex:
+        futs = {ex.submit(_block_retry, f, m, Nnorm, Tnorm, RBp, nt, chunk, flip, fields,
+                          tries, wait): f
+                for f in files}
+        for fu in as_completed(futs):
+            try:
+                xs, ys, blk = fu.result()
+            except Exception as e:
+                msg = f"cannot read {futs[fu].name}: {type(e).__name__}: {e}"
+                if not skip_bad:
+                    raise SystemExit(msg + "  (still being written?  --skip-bad to NaN it)")
+                print("  ! " + msg + " -- block left NaN", flush=True)
+                continue
+            for k, v in blk.items():
+                if k not in G:
+                    G[k] = np.full((nt, nx, ny), np.nan, dtype=v.dtype)
+                G[k][:, xs, ys] = v
+            done += 1
+            if done % max(1, len(files) // 32) == 0 or done == len(files):
+                print(f"  {done}/{len(files)} files  ({time.time() - t_start:.0f}s)", flush=True)
+
+    # ---- gradients and coefficients
+    def ddr(f):
+        return np.gradient(f, axis=1) / dx[None] * RBp[None]
+
+    def fick(num, den):
+        scale = np.nanmax(np.abs(den))
+        if not np.isfinite(scale) or scale == 0.0:
+            return np.full(num.shape, np.nan)
+        bad = ~np.isfinite(den) | (np.abs(den) < REL_EPS * scale)
+        out = -num / np.where(bad, 1.0, den)
+        out[bad] = np.nan
+        if x_guards > 0:
+            out[:, :x_guards] = np.nan
+            out[:, -x_guards:] = np.nan
+        return out
+
+    gn, gTe = ddr(G["n"]), ddr(G["Te"])
+    A = {}
+    A["Gamma_ExB"], A["Gamma_dia"] = G["G_E"], G["G_D"]
+    A["q_ExB"], A["q_dia"] = G["qe_E"], G["qe_D"]
+    A["D_ExB"], A["D_dia"] = fick(G["G_E"], gn), fick(G["G_D"], gn)
+    A["D_total"] = A["D_ExB"] + A["D_dia"]
+    A["chi_ExB"] = fick(G["qe_E"], G["n"] * gTe)
+    A["chi_dia"] = fick(G["qe_D"], G["n"] * gTe)
+    A["chi_total"] = A["chi_ExB"] + A["chi_dia"]
+    A["cross_phase"] = G["cp"]
+
+    A["Gamma_txy"], A["qe_txy"] = G["G_E"], G["qe_E"]
+    A["ni_txy"], A["Te_txy"] = G["n"], G["Te"]
+    A["Da_t"], A["Xe_t"] = A["D_ExB"], A["chi_ExB"]
+    A["ddr_nitot_txy"] = A["ddr_ni_txy"] = gn
+    A["ddr_Tetot_txy"] = A["ddr_Te_txy"] = gTe
+    if "Ti" in G:
+        gTi = ddr(G["Ti"])
+        A["Ti_txy"], A["qi_txy"] = G["Ti"], G["qi_E"]
+        A["Xi_t"] = fick(G["qi_E"], G["n"] * gTi)
+        A["ddr_Titot_txy"] = A["ddr_Ti_txy"] = gTi
+    A["Vexbx_txy"] = G["vr"]                     # rms radial ExB speed [m/s]
+    A["sqrt_g11"] = RBp
+    pairs = {"Da": ("Gamma_txy", gn, False), "Xe": ("qe_txy", gTe, True),
+             "Xi": ("qi_txy", A.get("ddr_Titot_txy"), True)}
+    for k, (fl, gr, with_n) in pairs.items():
+        if f"{k}_t" in A:
+            A[k] = np.nanmean(A[f"{k}_t"], axis=0)
+            den = np.nanmean(gr, 0) * (np.nanmean(G["n"], 0) if with_n else 1.0)
+            A[f"{k}_eff"] = fick(np.nanmean(A[fl], 0)[None], den[None])[0]
+
+    for k, v in A.items():
+        np.save(nd / f"{k}.npy", v)
+    for name in ("Ni", "Te", "Ti"):                 # min/max/mean as perturbation from the grid profile
+        if f"{name}_mean" in G:
+            b = back.get(name, 0.0)
+            np.save(nd / f"{name}_zred.npy",
+                    np.stack([G[f"{name}_min"] - b, G[f"{name}_max"] - b,
+                              G[f"{name}_mean"] - b, G[f"{name}_rms"]]))
+    json.dump(dict(code="hermes", Nnorm=Nnorm, Tnorm=Tnorm, Omega_ci=Om,
+                   vars={k: v if isinstance(v, str) else list(v) for k, v in m.items()},
+                   flip_vr=flip, units="SI; D, chi in m^2/s; Gamma m^-2 s^-1; q eV m^-2 s^-1"),
+              open(nd / "hermes_save.json", "w"), indent=1)
+
+    jomp = int(np.argmax(R[nx // 2]))
+    last = slice(-max(1, nt // 3), None)
+    print(f"\nsaved {len(A)} arrays to {nd}  ({time.time() - t_start:.0f}s)")
+    for k in ("D_ExB", "D_dia", "D_total", "chi_ExB", "Xi_t"):
+        if k in A:
+            a = A[k][last, :, jomp]
+            print(f"  {k:<9} last third, OMP column j={jomp}: median |.| "
+                  f"{np.nanmedian(np.abs(a)):.3e}  max {np.nanmax(np.abs(a)):.3e} m^2/s")
+    cp = G["cp"][last, :, jomp]
+    print(f"  cross-phase C (n, dphi/dz) at OMP, last third: mean {np.nanmean(cp):+.3f}")
+    neg = np.nanmean(A["D_ExB"][last] < 0)
+    print(f"  fraction of D_ExB < 0 (last third): {neg:.0%}"
+          + ("   <- mostly negative: rerun with --flip-vr (grid handedness)" if neg > 0.6 else ""))
+    return A
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(prog="hermes_save")
+    ap.add_argument("path", nargs="?", type=Path, default=Path("."))
+    ap.add_argument("--grid", type=Path, default=None)
+    ap.add_argument("-w", "--workers", type=int,
+                    default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)),
+                    help="dump files read in parallel (default: SLURM_CPUS_PER_TASK)")
+    ap.add_argument("--chunk", type=int, default=16, help="outputs per read inside a worker")
+    ap.add_argument("--ion", default=None, help="ion species suffix, e.g. d+ (default: auto)")
+    ap.add_argument("--flip-vr", action="store_true", help="reverse the v_r sign convention")
+    ap.add_argument("--x-guards", type=int, default=0, help="NaN the first/last N x cells of D, chi")
+    ap.add_argument("--fields", action="store_true",
+                    help="also write full 4-D Ni/Te/Ti .npy (slow on CFS; the z-reduced "
+                         "min/max/mean/rms are always written as <var>_zred.npy)")
+    ap.add_argument("--live", action="store_true",
+                    help="the simulation is still running: use only complete records, "
+                         "retry files caught mid-write")
+    ap.add_argument("--retries", type=int, default=None, help="read attempts per file "
+                    "(default 4 with --live, else 1)")
+    ap.add_argument("--retry-wait", type=float, default=5.0, help="seconds before 1st retry")
+    ap.add_argument("--t-end", type=int, default=None, help="use outputs [0, t_end) only")
+    ap.add_argument("--skip-bad", action="store_true",
+                    help="leave the blocks of unreadable dump files as NaN instead of stopping")
+    a, _ = ap.parse_known_args()
+    run(a.path, str(a.grid or find_grid(a.path)), chunk=a.chunk, flip=a.flip_vr,
+        save_fields=a.fields, ion=a.ion, workers=a.workers, x_guards=a.x_guards,
+        skip_bad=a.skip_bad, live=a.live, tries=a.retries, wait=a.retry_wait, t_end=a.t_end)

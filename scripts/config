@@ -609,6 +609,11 @@ def main() -> None:
                    help="force an unquoted value")
     args = p.parse_args()
 
+    # accept key=value as well as key value
+    if args.key and "=" in args.key and not args.value:
+        args.key, _, v = args.key.partition("=")
+        args.value = [v]
+
     cfg = find_config(args.file)
 
     if args.edit:

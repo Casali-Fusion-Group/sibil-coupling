@@ -70,11 +70,69 @@ Hard dependencies: numpy + matplotlib.  ipywidgets, boututils, netCDF4 optional.
 from __future__ import annotations
 
 import os
+import threading
 import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import SymLogNorm
+import re
+
+
+# --------------------------------------------------------------------------- #
+# Safe rendering.  matplotlib's mathtext parser is a process-wide singleton;
+# two draws overlapping (widget redraw on resize while full_report is laying
+# out a figure) empty its state stack mid-parse and raise
+#   ValueError: ParseException: exception raised in parse action (at char 0)
+# on a perfectly valid label.  Every layout/save/show goes through one lock,
+# and on that error the parser is rebuilt and the draw retried; if it still
+# fails, the figure's math is turned into plain text so the draw cannot fail.
+# --------------------------------------------------------------------------- #
+_RENDER_LOCK = threading.RLock()
+
+
+def _reset_mathtext():
+    import matplotlib.mathtext as _mt
+    import matplotlib.text as _mtext
+    _mt.MathTextParser._parser = None
+    cache = getattr(_mtext, "_get_text_metrics_with_cache_impl", None)
+    if cache is not None and hasattr(cache, "cache_clear"):
+        cache.cache_clear()
+
+
+def _demath(fig):
+    from matplotlib.text import Text
+    for t in fig.findobj(Text):
+        s = t.get_text()
+        if "$" in s:
+            t.set_text(re.sub(r"\\([A-Za-z]+)", r"\1", s.replace("$", "")).replace("{", "").replace("}", ""))
+        try:
+            t.set_parse_math(False)
+        except AttributeError:
+            pass
+
+
+def _guarded(fig, action, what):
+    with _RENDER_LOCK:
+        for attempt in range(3):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    return action()
+            except (ValueError, RuntimeError, IndexError) as e:
+                if attempt == 0:
+                    _reset_mathtext()
+                elif attempt == 1:
+                    _demath(fig)
+                else:
+                    print(f"  ! {what} failed ({type(e).__name__}: {str(e).strip()[:80]})")
+            except Exception as e:
+                print(f"  ! {what} failed ({type(e).__name__}: {str(e).strip()[:80]})")
+                return None
+
+
+def _safe_layout(fig):
+    return _guarded(fig, fig.tight_layout, "tight_layout")
 
 # --------------------------------------------------------------------------- #
 # Naming conventions used by the SIBIL notebook
@@ -236,12 +294,7 @@ def _style(fig):
     if st is not None and st.get_text():
         st.set_text(_wrap_title(st.get_text()))
         st.set_fontsize(TITLE_FS)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            fig.tight_layout()
-        except Exception:
-            pass
+    _safe_layout(fig)
     fig._sibil_styled = True
 
 
@@ -250,13 +303,23 @@ def _save(fig, savedir, fname):
     if savedir:
         os.makedirs(savedir, exist_ok=True)
         path = os.path.join(savedir, fname)
-        fig.savefig(path, dpi=140, bbox_inches="tight")
-        print(f"  saved {path}")
+        if _guarded(fig, lambda: fig.savefig(path, dpi=140, bbox_inches="tight") or True,
+                    f"save {fname}"):
+            print(f"  saved {path}")
 
 
 def _show(fig):
     _style(fig)
-    plt.show()
+    try:
+        from IPython import get_ipython
+        from IPython.display import display
+        kernel = get_ipython() is not None
+    except ImportError:
+        kernel = False
+    if kernel:
+        _guarded(fig, lambda: display(fig) or True, "display")
+    else:
+        _guarded(fig, lambda: plt.show() or True, "show")
     plt.close(fig)
 
 
@@ -692,7 +755,7 @@ def check_grid_equilibrium(grid_or_path, jomp=44, eps_dx=0.05,
     axs[-1].set_xlabel(r"$\psi_n$", fontsize=12)
     axs[-1].set_xlim(max(x.min(), 0.85), min(x.max(), 1.10))
     fig.suptitle(f"Equilibrium / grid check at poloidal index {jomp}", y=1.0)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"grid_equilibrium_j{jomp}.png")
     _show(fig)
     return fig
@@ -831,7 +894,7 @@ def topology_check(grid_or_path, PF_limit_range=0.98, PF_limit=True, bpxy_constr
         a.set_ylabel(r"$\psi_n$ (midplane map)",fontsize=9)
     fig.suptitle("Grid topology: red = Bp floor contour, dashed = X-point cuts, "
                  "magenta = PF_limit cut", fontsize=10)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "topology_check.png")
     _show(fig)
     return topo
@@ -900,7 +963,7 @@ def equilibrium_kink_map(grid_or_path, topo=None, names=None, savedir=None):
         a.set_xlabel("poloidal index")
     for a in axs[:, 0]:
         a.set_ylabel(r"$\psi_n$",fontsize=9)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "equilibrium_kink_map.png")
     _show(fig)
     return fig
@@ -968,7 +1031,7 @@ def sawtooth_report(coeffs, psin, j=44, keys=None, savedir=None):
     axs[-1][0].set_xlabel(r"$\psi_n$", fontsize=12)
     axs[-1][1].set_xlabel("time index", fontsize=12)
     fig.suptitle(f"2$\\Delta x$ content, poloidal index {j}", y=1.0)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"sawtooth_j{j}.png")
     _show(fig)
     return fig
@@ -986,6 +1049,107 @@ def _fit_gamma(tr, timestep, tfit=None):
     if ok.size < 3:
         return np.nan
     return np.polyfit(ok * timestep, np.log(tr[ok]), 1)[0]
+
+
+def _sliding_gamma(tr, timestep, win=5):
+    """Local growth rate [1/tau_A]: slope of ln(A) over a centred window of `win` outputs."""
+    tr = np.asarray(tr, dtype=float)
+    nt, h = tr.size, win // 2
+    g = np.full(nt, np.nan)
+    for t in range(nt):
+        i0, i1 = max(0, t - h), min(nt, t + h + 1)
+        g[t] = _fit_gamma(tr, timestep, np.arange(i0, i1))
+    return g
+
+
+def saturation_trace(red=None, coeffs=None, topo=None, back=None, timestep=10.0,
+                     win=5, last=10, tol=2e-3, savedir=None, show=True):
+    """
+    Is the nonlinear run saturating?  For each region (core | SOL upstream |
+    leg SOL | leg PF) and each quantity:
+        Te, Ni    max over the region of rms_z(f) / f0     (fluctuation level)
+        D, chi_e  median over the region of |coefficient|  (transport level)
+    top row    amplitude vs time
+    bottom row local growth rate gamma(t) tau_A = slope of ln A over `win`
+               outputs, with the +-tol band
+    Verdict per region over the last `last` outputs:
+        SATURATED  |gamma| < tol     GROWING  gamma > tol     DECAYING  gamma < -tol
+    gamma_last / gamma_max compares the end of the run with its fastest growth
+    (~1 = still linear, ~0 = saturated).
+    """
+    regs = ["core", "SOL upstream", "leg SOL", "leg PF"]
+    region = topo["region"]
+    visible = ~topo["blank"]
+    series = {}
+    for v in ("Te", "Ni"):
+        if red and red.get(v) is not None:
+            b = np.abs(back[v]) if back and v in back else 1.0
+            series[f"d{v}_rms/{v}0"] = (red[v]["rms"] / b, "max", visible)
+    for k, nm in (("Da_t", "D"), ("Xe_t", "chi_e")):
+        if coeffs is not None and k in coeffs:
+            series[nm] = (np.abs(np.asarray(coeffs[k], dtype=float)), "median",
+                                        np.ones_like(visible))
+    if not series:
+        print("  saturation_trace: nothing to analyse (need Te/Ni .npy or Da_t/Xe_t)")
+        return None
+
+    names = list(series)
+    fig, axs = plt.subplots(2, len(names), figsize=(4.4 * len(names), 7.0),
+                            sharex=True, squeeze=False)
+    out = {}
+    print(f"  gamma tau_A over the last {last} outputs (tol {tol:g}; "
+          f"window {win} outputs; timestep {timestep:g} tau_A)")
+    print(f"  {'quantity':<16} {'region':<14} {'final':>9} {'gamma_last':>11} "
+          f"{'gamma_max':>10} {'ratio':>6}  state")
+    for c, name in enumerate(names):
+        arr, how, vis = series[name]
+        nt = arr.shape[0]
+        t = np.arange(nt)
+        for rg in regs:
+            m = (region == rg) & vis
+            if not m.any():
+                continue
+            vals = arr[:, m]
+            tr = (np.nanmax(vals, axis=1) if how == "max" else np.nanmedian(vals, axis=1))
+            tr = np.where(np.isfinite(tr) & (tr > 0), tr, np.nan)
+            g = _sliding_gamma(tr, timestep, win)
+            gl = _fit_gamma(tr, timestep, np.arange(max(0, nt - last), nt))
+            gm = np.nanmax(g) if np.isfinite(g).any() else np.nan
+            state = ("?" if not np.isfinite(gl) else "SATURATED" if abs(gl) < tol
+                     else "GROWING" if gl > 0 else "DECAYING")
+            ratio = gl / gm if np.isfinite(gm) and gm > 0 else np.nan
+            out[(name, rg)] = dict(trace=tr, gamma=g, gamma_last=gl, gamma_max=gm, state=state)
+            col = REGION_COLORS[rg]
+            axs[0, c].semilogy(t, tr, "o-", ms=2.5, color=col, label=f"{rg}: {state}")
+            axs[1, c].plot(t, g, "-", color=col, label=f"{rg} ({gl:+.4f})")
+            print(f"  {name:<16} {rg:<14} {tr[-1]:9.2e} {gl:+11.4f} {gm:+10.4f} "
+                  f"{ratio:6.2f}  {state}")
+        axs[0, c].set_title({"D": r"$D$ (region median) [m$^2$/s]",
+                             "chi_e": r"$\chi_e$ (region median) [m$^2$/s]"}.get(
+                                 name, f"{name} (region max)"), fontsize=12)
+        axs[0, c].legend(fontsize=7)
+        axs[0, c].grid(True, alpha=0.3, which="both")
+        a = axs[1, c]
+        a.axhspan(-tol, tol, color="0.85", zorder=0)
+        a.axhline(0, color="k", lw=0.6)
+        a.set_xlabel("time index", fontsize=12)
+        a.grid(True, alpha=0.3)
+        a.legend(fontsize=7, title=r"$\gamma\,\tau_A$ last %d" % last, title_fontsize=7)
+        fin = np.concatenate([o["gamma"][np.isfinite(o["gamma"])] for (n_, _), o in out.items()
+                              if n_ == name] or [np.zeros(1)])
+        if fin.size:
+            lo, hi = np.percentile(fin, [2, 98])
+            pad = 0.1 * (hi - lo + 1e-6)
+            a.set_ylim(min(lo, -tol) - pad, max(hi, tol) + pad)
+        a.ticklabel_format(axis="y", useOffset=False)
+    axs[0, 0].set_ylabel("amplitude", fontsize=12)
+    axs[1, 0].set_ylabel(r"local $\gamma\,\tau_A$", fontsize=12)
+    fig.suptitle("Saturation check: amplitude and local growth rate by region", fontsize=15)
+    _safe_layout(fig)
+    _save(fig, savedir, "saturation_trace.png")
+    if show:
+        _show(fig)
+    return out
 
 
 def growth_report(coeffs, psin, keys=None, timestep=10.0, perturbation=True,
@@ -1037,7 +1201,7 @@ def growth_report(coeffs, psin, keys=None, timestep=10.0, perturbation=True,
         a.tick_params(axis="both", which="both", labelsize=7)
         a.legend(fontsize=7, ncol=2)
     ax0.set_ylabel(ttl, fontsize=12)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "growth.png")
     _show(fig)
     return fig
@@ -1116,7 +1280,7 @@ def crash_trace(coeffs, psin, topo, keys=None, timestep=10.0, perturbation=True,
     ax.set_xlabel("poloidal index")
     ax.set_ylabel(r"$\psi_n$",fontsize=12)
     ax.set_title(f"location of max|{LABELS.get(name, name)}|", fontsize=10)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "crash_trace.png")
     _show(fig)
     return fig
@@ -1215,7 +1379,7 @@ def spike_locator(coeffs, psin, topo, key="Xe_t", t_from=None, savedir=None):
     print(f"  leg rows: modal spike index ix={top} (psi_n {x[top]:.4f}), "
           f"{w_leg[top] / max(w_leg.sum(), 1):.0%} of samples; "
           f"PF_limit cut at ix={topo['pf_cut_ix']}, separatrix at ix={topo['ixsep']}")
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"spike_locator_{key}.png")
     _show(fig)
     return fig
@@ -1260,7 +1424,7 @@ def parallel_structure(coeffs, psin, topo, key="Xe_t", psi_list=None,
         ax.set_ylim(bottom=floor)
     axs[0][0].set_ylabel(f"|{LABELS.get(key, key)} - f0|  (grey = target)", fontsize=9)
     axs[0][0].legend(fontsize=7)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"parallel_structure_{key}.png")
     _show(fig)
     return fig
@@ -1304,7 +1468,7 @@ def poloidal_localization(coeffs, psin, t=-1, keys=None, jomp=None, topo=None,
     ax.set_title(f"Poloidal localisation at time index {t}", fontsize=10)
     ax.grid(True, alpha=0.3, which="both")
     ax.legend(fontsize=7, ncol=3)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"poloidal_localization_t{t}.png")
     _show(fig)
     return fig
@@ -1482,7 +1646,7 @@ def plot_vexb(vexb, psin, topo=None, grid=None, t=-1, jomp=44, j=None,
     a3.legend(fontsize=7)
     a3.grid(True, alpha=0.3, which="both")
 
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"vexb_t{t}.png")
     _show(fig)
     return fig
@@ -1537,7 +1701,7 @@ def velocity_consistency(coeffs, psin, j=44, t=-1, grid=None, savedir=None):
         a.grid(True, alpha=0.3)
         a.tick_params(labelsize=7)
     fig.suptitle(f"Velocity decomposition, pol idx {j}, time idx {t}")
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"velocity_consistency_j{j}_t{t}.png")
     _show(fig)
     return fig
@@ -1586,7 +1750,7 @@ def nonfinite_report(coeffs, psin, topo=None, keys=None, savedir=None):
     ax.set_xlabel("poloidal index")
     ax.set_ylabel(r"$\psi_n$",fontsize=12)
     ax.set_title(f"non-finite cells of {k0} at its first bad output t={t0}", fontsize=10)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "nonfinite_map.png")
     _show(fig)
     return fig
@@ -1640,7 +1804,7 @@ def background_consistency(coeffs, psin, grid_or_path, jomp=44, savedir=None):
         _sep_line(ax)
     axs[-1, 0].set_xlabel(r"$\psi_n$")
     fig.suptitle(f"Background gradient consistency at j={jomp}", fontsize=10)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, f"background_consistency_j{jomp}.png")
     _show(fig)
     return fig
@@ -1717,7 +1881,7 @@ def vorticity_terms(terms, psin, topo, timestep=10.0, savedir=None):
     axs[0][0].set_ylabel("max |term| in region",fontsize=12)
     axs[0][0].legend(fontsize=7)
     fig.suptitle("Vorticity-equation term balance (output_transfer)", fontsize=10)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "vorticity_terms.png")
     _show(fig)
     return fig
@@ -1778,7 +1942,7 @@ def floor_watch(pert, back, psin, topo, frac=0.05, savedir=None):
     _overlay_topology(axs[1], topo, x)
     axs[1].set_xlabel("poloidal index")
     axs[1].set_ylabel(r"$\psi_n$",fontsize=12)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "floor_watch.png")
     _show(fig)
     return fig
@@ -1833,10 +1997,127 @@ def failed_state_report(data_dir, topo, psin, red=None,
         ax.set_title(f"{v}: log10 failed-state amplitude", fontsize=8)
         ax.set_xlabel("poloidal index")
     axs[0][0].set_ylabel(r"$\psi_n$",fontsize=12)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "failed_state.png")
     _show(fig)
     return fig
+
+
+
+# --------------------------------------------------------------------------- #
+# Presentation figure: midplane D, chi profiles
+# --------------------------------------------------------------------------- #
+TALK_COLORS = {"Da_t": "#2a78d6", "Xe_t": "#eb6834", "Xi_t": "#1baf7a"}
+TALK_LABELS = {"Da_t": r"$D$", "Xe_t": r"$\chi_e$", "Xi_t": r"$\chi_i$"}
+TALK_STYLES = {"Da_t": "-", "Xe_t": "--", "Xi_t": "-."}
+
+
+def talk_midplane_profile(coeffs, psin, jomp, window=None, keys=("Da_t", "Xe_t", "Xi_t"),
+                          savedir=None, fname="midplane_D_chi", floor=None, run=None,
+                          xlim=None, ylim=None, band=True, transparent=False, show=True):
+    """
+    Slide-ready outboard-midplane profiles of D, chi_e, chi_i [m^2/s] vs psi_n.
+
+    Line  = median over the time window (robust to the occasional spike),
+    band  = 25-75 % range over the same outputs.
+    window: (t0, t1) output indices; default = last third of the run.
+    floor:  optional dict drawn as dotted reference lines, e.g.
+            {"D": 0.05, "chi_e": 0.01} (Zhang et al. neoclassical floor).
+    Saves <fname>.png (300 dpi), <fname>.pdf and <fname>.csv in savedir.
+    """
+    import matplotlib as mpl
+    x = np.asarray(psin, dtype=float)
+    keys = [k for k in keys if k in coeffs]
+    if not keys:
+        print("  talk_midplane_profile: none of Da_t/Xe_t/Xi_t in coeffs")
+        return None
+    nt = min(np.asarray(coeffs[k]).shape[0] for k in keys)
+    t0, t1 = window if window is not None else (nt - max(nt // 3, 1), nt)
+    t0, t1 = max(0, int(t0)), min(nt, int(t1))
+    rows = {"psi_n": x}
+    ink, ink2, grid_c, surf = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
+    rc = {"font.size": 14, "axes.labelsize": 16, "legend.fontsize": 13,
+          "xtick.labelsize": 13, "ytick.labelsize": 13, "axes.linewidth": 1.0,
+          "axes.spines.top": False, "axes.spines.right": False,
+          "axes.edgecolor": ink2, "xtick.color": ink2, "ytick.color": ink2,
+          "axes.labelcolor": ink, "text.color": ink,
+          "figure.facecolor": surf, "axes.facecolor": surf}
+    with mpl.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(8.0, 5.0))
+        ends = []
+        for k in keys:
+            a = np.asarray(coeffs[k], dtype=float)[t0:t1, :, jomp]
+            a = np.where(np.isfinite(a), a, np.nan)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                med = np.nanmedian(a, axis=0)
+                lo, hi = np.nanpercentile(a, 25, axis=0), np.nanpercentile(a, 75, axis=0)
+            base = k.replace("_t", "")
+            rows[base + "_median"], rows[base + "_p25"], rows[base + "_p75"] = med, lo, hi
+            pos = np.where(med > 0, med, np.nan)
+            c = TALK_COLORS.get(k, "0.3")
+            if band:
+                ax.fill_between(x, np.where(lo > 0, lo, np.nan), np.where(hi > 0, hi, np.nan),
+                                color=c, alpha=0.15, lw=0, zorder=1)
+            ax.plot(x, pos, TALK_STYLES.get(k, "-"), color=c, lw=2.2, zorder=3,
+                    label=TALK_LABELS.get(k, k))
+            ok = np.where(np.isfinite(pos))[0]
+            if ok.size:
+                ends.append((k, x[ok[-1]], pos[ok[-1]]))
+            nneg = int(np.sum(med[np.isfinite(med)] <= 0))
+            if nneg:
+                print(f"  {k}: {nneg} psi_n points with median <= 0 not drawn (log axis)")
+        ax.set_yscale("log")
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        xl, yl = ax.get_xlim(), ax.get_ylim()
+        if floor:
+            for lab, v in floor.items():
+                ax.axhline(v, color=ink2, lw=1.0, ls=(0, (2, 3)), zorder=2)
+                ax.text(xl[0] + 0.01 * (xl[1] - xl[0]), v * 1.1, f"{lab} floor {v:g}",
+                        color=ink2, fontsize=11, va="bottom")
+        ax.axvline(1.0, color=ink2, lw=1.0, ls="--", zorder=2)
+        ax.grid(True, which="major", axis="y", color=grid_c, lw=0.8, zorder=0)
+        ax.set_xlabel(r"$\psi_n$")
+        ax.set_ylabel(r"transport coefficient  [m$^2$/s]")
+        ax.text(1.0, yl[1], " separatrix", color=ink2, fontsize=12, va="top", ha="left")
+        ax.text(xl[0] + 0.02 * (xl[1] - xl[0]), yl[1], "core", color=ink2, fontsize=13,
+                va="top", ha="left", style="italic")
+        ax.text(xl[1] - 0.02 * (xl[1] - xl[0]), yl[1], "SOL", color=ink2, fontsize=13,
+                va="top", ha="right", style="italic")
+        for k, xe, ye in ends:                                    # direct labels
+            if xl[0] <= xe <= xl[1] and yl[0] <= ye <= yl[1]:
+                ax.annotate(TALK_LABELS.get(k, k), (xe, ye), xytext=(6, 0),
+                            textcoords="offset points", color=ink, fontsize=14, va="center")
+        leg = ax.legend(loc="best", frameon=True, ncol=1, handlelength=2.6,
+                        framealpha=0.92, edgecolor="none", facecolor=surf)
+        leg.set_zorder(5)
+        sub = f"outboard midplane (j = {jomp}), median of outputs {t0}-{t1 - 1}"
+        ax.set_title((f"{run}\n" if run else "") + sub, fontsize=13, color=ink2, loc="left")
+        _safe_layout(fig)
+        if savedir:
+            os.makedirs(savedir, exist_ok=True)
+            base = os.path.join(savedir, fname)
+            _guarded(fig, lambda: fig.savefig(base + ".png", dpi=300,
+                                              transparent=transparent) or True, "save png")
+            _guarded(fig, lambda: fig.savefig(base + ".pdf", transparent=transparent) or True,
+                     "save pdf")
+            cols = list(rows)
+            np.savetxt(base + ".csv", np.column_stack([rows[c] for c in cols]),
+                       delimiter=",", header=",".join(cols), comments="")
+            print(f"  saved {base}.png / .pdf / .csv")
+        if show:
+            try:
+                from IPython import get_ipython
+                from IPython.display import display
+                if get_ipython() is not None:
+                    _guarded(fig, lambda: display(fig) or True, "display")
+            except ImportError:
+                pass
+        plt.close(fig)
+    return rows
 
 
 # =========================================================================== #
@@ -2092,6 +2373,16 @@ def _load_reduced(data_dir, var, nx, ny, chunk=8, verbose=True):
     Accepts (t, x, y, z) or (t, x, y); y guard cells (ny+4) are dropped.
     Returns dict(min, max, mean, rms) of shape (t, x, y), plus 't', or None.
     """
+    zp = os.path.join(data_dir, f"{var}_zred.npy")
+    if not os.path.exists(zp):
+        zp = os.path.join(data_dir, "numpy", f"{var}_zred.npy")
+    if os.path.exists(zp):                       # hermes_save: already reduced over z
+        z = np.load(zp, mmap_mode="r")
+        out = {k: np.asarray(z[i]) for i, k in enumerate(("min", "max", "mean", "rms"))}
+        tp = _find_npy(data_dir, "t_array")
+        out["t"] = (np.asarray(np.load(tp)) if tp is not None
+                    else np.arange(out["mean"].shape[0], dtype=float))
+        return out
     path = _find_npy(data_dir, var)
     if path is None:
         if verbose:
@@ -2177,7 +2468,7 @@ def rhs_cost_trace(run_dir, log_names=("BOUT.log.0", "output"), savedir=None):
     if flag:
         title += f"  |  failed: flag {flag[0]}" + (f" at t={mx[0]}" if mx else "")
     ax.set_title(title, fontsize=9)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "rhs_cost.png")
     _show(fig)
     k = max(3, len(ev) // 5)
@@ -2318,7 +2609,7 @@ def crash_fields_2d(red, back, psin, topo, grid_or_path, data_dir=None, times=No
         for ax in axs[:, 0]:
             ax.set_ylabel(r"$\psi_n$",fontsize=12)
         fig.suptitle(f"crash-relevant fields at output {t} (+ = extreme)", fontsize=10)
-        fig.tight_layout()
+        _safe_layout(fig)
         _save(fig, savedir, f"crash_fields_2d_t{t}.png")
         _show(fig)
     return None
@@ -2413,6 +2704,14 @@ def _load_linear(data_dir, topo, fields=LINEAR_FIELDS, chunk=8, verbose=True):
         r = _load_reduced(data_dir, v, topo["nx"], topo["ny"], chunk=chunk, verbose=False)
         if r is not None:
             red[v] = r
+    if red:
+        nts = {v: r["mean"].shape[0] for v, r in red.items()}
+        nt = min(nts.values())
+        if len(set(nts.values())) > 1:
+            print("  ! fields have different nt " + str(nts) + f" -- truncating to {nt}")
+        for r in red.values():
+            for k in r:
+                r[k] = r[k][:nt]
     if verbose:
         print("  fields: " + (", ".join(red) if red else "none found in " + str(data_dir)))
     return red
@@ -2512,7 +2811,7 @@ def linear_report(data_dir, grid_or_path, psin, topo=None, jomp=44, run_dir=None
     for a in axs:
         a.set_xlabel("time index")
         a.grid(True, alpha=0.3, which="both")
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "linear_growth.png")
     _show(fig) if show else plt.close(fig)
 
@@ -2554,7 +2853,7 @@ def linear_report(data_dir, grid_or_path, psin, topo=None, jomp=44, run_dir=None
                          fontsize=9)
     for a in axs[1:]:
         a.grid(True, alpha=0.3, which="both")
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "linear_mode.png")
     _show(fig) if show else plt.close(fig)
 
@@ -2606,7 +2905,7 @@ def linear_scan_summary(run_dirs, grid_or_path, psin, jomp=44, field="Te",
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     ax.set_title("linear spectrum", fontsize=10)
-    fig.tight_layout()
+    _safe_layout(fig)
     _save(fig, savedir, "linear_spectrum.png")
     _show(fig)
     print("\n  n     gamma*tauA   omega*tauA   converged   run")
@@ -2659,8 +2958,7 @@ def make_linear_widget(data_dir, psin, jomp=None, grid=None, default_j=44):
         a1.legend(fontsize=7)
         for a in (a0, a1):
             a.grid(True, alpha=0.3, which="both")
-        _style(fig)
-        plt.show()
+        _show(fig)
 
     out = interactive_output(_plot, {"j": j_sl, "t": t_sl, "norm": norm_cb})
     return VBox([hdr, HBox([j_sl, t_sl, norm_cb]), out])
@@ -2875,6 +3173,24 @@ def _full_report(run_dir, grid_or_path, coeffs=None, psin=None, jomp=44,
                                   if leg_frac is not None else "")
                                  + (f"leg/upstream {leg_vs_up:.1e}" if leg_vs_up else "n/a")
                                  + (f", {failed_where}" if failed_where else ""))
+
+    head("H5  SATURATION (local growth rate vs time)")
+    ts_inp = _read_inp(run_dir).get("timestep") if run_dir else None
+    sat = saturation_trace(red, coeffs, topo, back=back,
+                           timestep=float(ts_inp) if ts_inp else timestep, savedir=savedir)
+    if sat:
+        st = {}
+        for (name, rg), o in sat.items():
+            st.setdefault(rg, []).append(o["state"])
+        summ = {rg: ("SATURATED" if all(x == "SATURATED" for x in v) else
+                     "GROWING" if "GROWING" in v else "mixed") for rg, v in st.items()}
+        verdict["H5 saturation"] = ("info", "; ".join(f"{rg}: {v}" for rg, v in summ.items()))
+    else:
+        verdict["H5 saturation"] = (None, "not available")
+
+    if coeffs is not None:
+        head("MIDPLANE D / CHI PROFILE (slide figure)")
+        talk_midplane_profile(coeffs, x, jomp, savedir=savedir, run=run, show=False)
 
     head("H4  DRIVE (vorticity terms, needs output_transfer = true)")
     terms = {}

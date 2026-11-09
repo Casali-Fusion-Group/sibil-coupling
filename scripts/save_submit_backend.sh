@@ -46,6 +46,9 @@ if [ ! -f "$BOUT_SAVE_PY" ]; then
 fi
 
 # OpenMP settings (single core)
+# NERSC CFS: HDF5 file locking fails on files another process has open
+export HDF5_USE_FILE_LOCKING=FALSE
+
 export OMP_NUM_THREADS=1
 export OMP_PLACES=threads
 export OMP_PROC_BIND=true
@@ -63,7 +66,11 @@ if [ "$CONDA_RC" -ne 0 ]; then
     echo "Warning: 'conda activate bout-data' returned $CONDA_RC" >&2
 fi
 
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/global/cfs/projectdirs/m4491/ABOUND/local_libs/usr/netcdf-4.1.3/lib
+# old netCDF 4.1.3 for the elm-6f / BOUT++ v3 files; hermes_save_submit sets
+# SAVE_OLD_NETCDF=0 so newer (BOUT++ v5 / Hermes) files use conda's netCDF/HDF5
+if [ "${SAVE_OLD_NETCDF:-1}" = "1" ]; then
+    export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/global/cfs/projectdirs/m4491/ABOUND/local_libs/usr/netcdf-4.1.3/lib
+fi
 
 # Let `bout_save` import helper modules that live next to it, without
 # needing an installed package or a .py extension on the entry point.

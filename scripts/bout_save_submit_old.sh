@@ -18,6 +18,7 @@
 #   SAVE_QOS     QOS for every attempt         (default: premium)
 #   SAVE_TIME    walltime for every attempt    (default: 00:30:00)
 #   SAVE_TRIES   number of attempts            (default: 3)
+#   SAVE_CPUS    cores = variables collected in parallel (default: 16)
 #
 # Usage:   bout_save_submit.sh [DATA_DIR] [bout_save args...]
 # ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ SAVE_AFTER="${SAVE_AFTER:-}"
 SAVE_QOS="${SAVE_QOS:-debug}"
 SAVE_TIME="${SAVE_TIME:-00:30:00}"
 SAVE_TRIES="${SAVE_TRIES:-1}"
+SAVE_CPUS="${SAVE_CPUS:-16}"
 
 DATA_DIR="."
 if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ] && [ -d "$1" ]; then
@@ -62,21 +64,25 @@ if [ ! -f "$BACKEND_SCRIPT" ]; then
 fi
 
 # Job name: bsave_<tail of data dir basename>
-MAX_SUFFIX_LEN=20
+MAX_SUFFIX_LEN=20 # OLD - SUFFIX IS NOT USED FOR JOB NAMES, REPLACED BY PREFIX
+MAX_PREFIX_LEN=20
 BASE_NAME="$(basename "$DATA_DIR")"
 if [ "${#BASE_NAME}" -gt "$MAX_SUFFIX_LEN" ]; then
     SUFFIX="${BASE_NAME: -${MAX_SUFFIX_LEN}}"
+    PREFIX="${BASE_NAME:0:MAX_PREFIX_LEN}"
     case "$SUFFIX" in
         *_*) SUFFIX="${SUFFIX#*_}" ;;
     esac
 else
     SUFFIX="$BASE_NAME"
+    PREFIX="$BASE_NAME"
 fi
 SUFFIX="$(printf '%s' "$SUFFIX" | tr -c 'A-Za-z0-9._-' '_')"
-JOB_NAME="bsave_${SUFFIX}"
+PREFIX="$(printf '%s' "$PREFIX" | tr -c 'A-Za-z0-9._-' '_')"
+JOB_NAME="bsave_${PREFIX}"
 
 echo "Workdir:   $DATA_DIR"
-echo "QOS/time:  $SAVE_QOS / $SAVE_TIME   (up to $SAVE_TRIES attempts)"
+echo "QOS/time:  $SAVE_QOS / $SAVE_TIME   (up to $SAVE_TRIES attempts, $SAVE_CPUS cores)"
 
 # Command-line --qos/--time override any #SBATCH -q/-t in the backend.
 PREV=""
@@ -92,6 +98,7 @@ for i in $(seq 1 "$SAVE_TRIES"); do
                  --job-name="${JOB_NAME}_${i}" \
                  --qos="$SAVE_QOS" \
                  --time="$SAVE_TIME" \
+                 --cpus-per-task="$SAVE_CPUS" \
                  ${DEP:+--dependency="$DEP" --kill-on-invalid-dep=yes} \
                  --export=ALL,BOUT_SAVE_PY="$PY_SCRIPT" \
                  "$BACKEND_SCRIPT" "$@")

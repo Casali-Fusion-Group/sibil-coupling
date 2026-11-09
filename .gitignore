@@ -1,2 +1,3 @@
 .ipynb_checkpoints/
 .__pycache__/
+src/sibil/__pycache__/*
